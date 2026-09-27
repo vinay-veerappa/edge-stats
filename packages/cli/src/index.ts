@@ -416,11 +416,29 @@ program
   .option("--host <host>", "host")
   .action(async (opts: { port?: string; host?: string }) => {
     const ctx = await openContext(dirOpt());
-    startServer(
-      ctx,
-      opts.port ? Number(opts.port) : ctx.config.serve.port,
-      opts.host ?? ctx.config.serve.host,
-    );
+    // The server keeps the process alive, so there is no `finally` to close
+    // the store in: close it on Ctrl+C / SIGTERM instead. (A Stop-Process
+    // -Force is TerminateProcess and runs no handler at all.)
+    let closing = false;
+    const shutdown = (): void => {
+      if (closing) return;
+      closing = true;
+      void ctx.store.close().finally(() => process.exit(0));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    try {
+      startServer(
+        ctx,
+        opts.port ? Number(opts.port) : ctx.config.serve.port,
+        opts.host ?? ctx.config.serve.host,
+      );
+    } catch (e) {
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
+      await ctx.store.close();
+      throw e;
+    }
   });
 
 const live = program
