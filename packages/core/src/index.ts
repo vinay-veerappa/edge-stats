@@ -15,7 +15,7 @@ export * from "./calendar";
 
 // store
 export { Store } from "./store/store";
-export type { BarRow, IngestResult } from "./store/store";
+export type { BarRow, ExternalBarSource, IngestResult, StoreOptions } from "./store/store";
 
 // registry
 export * from "./registry";

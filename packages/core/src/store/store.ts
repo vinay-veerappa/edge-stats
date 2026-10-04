@@ -34,6 +34,27 @@ export interface BarRow {
   contract?: string | null;
 }
 
+/**
+ * A symbol whose bars live outside the data directory and are read in place:
+ * `<root>/<name>/<YYYY>.parquet` with `ts_open` (timestamp, UTC, open-stamped),
+ * `open high low close`, an integer `volume` and an optional `contract`.
+ * The store only ever reads these files.
+ */
+export interface ExternalBarSource {
+  /** The symbol as configured (what queries and `bars.symbol` call it). */
+  symbol: string;
+  tf: string;
+  /** Directory holding one sub-directory per root, e.g. `<store>/bars/1m`. */
+  root: string;
+  /** The root's sub-directory, e.g. `NQ`. */
+  name: string;
+}
+
+export interface StoreOptions {
+  /** Symbols read in place; they are never copied, ingested into, or dropped. */
+  external?: ExternalBarSource[];
+}
+
 export interface IngestResult {
   inserted: number;
   skipped: number;
@@ -56,22 +77,37 @@ function hasParquet(dir: string): boolean {
   return false;
 }
 
+/** Our bar columns as edge-stats' bar row. Both sides are open-stamped, so `ts` is a plain conversion. */
+const EXTERNAL_PROJECTION = `epoch_ms(ts_open) AS ts, open, high, low, close,
+  CAST(volume AS DOUBLE) AS volume, CAST(contract AS VARCHAR) AS contract`;
+
 export class Store {
+  private readonly externals: Map<string, ExternalBarSource>;
+
   private constructor(
     readonly dataDir: string,
     private readonly instance: DuckDBInstance,
     private readonly conn: DuckDBConnection,
-  ) {}
+    externals: ExternalBarSource[],
+  ) {
+    this.externals = new Map(externals.map((e) => [e.symbol, e]));
+  }
 
-  static async open(dataDir: string): Promise<Store> {
+  static async open(dataDir: string, opts: StoreOptions = {}): Promise<Store> {
     mkdirSync(dataDir, { recursive: true });
     mkdirSync(join(dataDir, "bars"), { recursive: true });
     mkdirSync(join(dataDir, "tmp"), { recursive: true });
     const instance = await DuckDBInstance.create(join(dataDir, "edge-stats.duckdb"));
     const conn = await instance.connect();
-    const store = new Store(dataDir, instance, conn);
-    await store.ensureSchema();
-    await store.refreshBarsView();
+    const store = new Store(dataDir, instance, conn, opts.external ?? []);
+    try {
+      await store.ensureSchema();
+      await store.refreshBarsView();
+    } catch (err) {
+      // a refused open (e.g. a missing external directory) must not keep the db file locked
+      await store.close();
+      throw err;
+    }
     return store;
   }
 
@@ -83,18 +119,58 @@ export class Store {
     return join(this.dataDir, "tmp");
   }
 
+  private refuseExternal(symbol: string, action: string): void {
+    if (this.externals.has(symbol)) {
+      throw new Error(
+        `refusing to ${action} '${symbol}': its bars are external and read in place, never written or deleted by edge-stats`,
+      );
+    }
+  }
+
+  /** True when this symbol's bars are read in place from an external store. */
+  isExternal(symbol: string): boolean {
+    return this.externals.has(symbol);
+  }
+
   /**
-   * The parquet globs for (symbol, tf) in the given years, existing
-   * partitions only. Reading through these instead of the `bars` view is
-   * how a per-session read stays independent of the size of the history.
+   * SQL source for (symbol, tf) restricted to the given years, with the
+   * columns `ts, open, high, low, close, volume`, or null when no partition
+   * exists. Reading through this instead of the `bars` view is how a
+   * per-session read stays independent of the size of the history.
+   *
+   * `window` ([fromMs, toMs) of bar opens) is only a pruning hint: an external
+   * source filters on the raw `ts_open` column, which DuckDB can prune row
+   * groups on, whereas a filter on the projected `epoch_ms(ts_open)` it cannot.
+   * Callers still apply their own `ts` predicate.
    */
-  barPartitionGlobs(symbol: string, tf: string, years: number[]): string[] {
+  barSource(
+    symbol: string,
+    tf: string,
+    years: number[],
+    window?: { fromMs: number; toMs: number },
+  ): string | null {
+    const external = this.externals.get(symbol);
+    if (external) {
+      const files: string[] = [];
+      for (const year of new Set(years)) {
+        const file = join(external.root, external.name, `${year}.parquet`);
+        if (existsSync(file)) files.push(sqlPath(file));
+      }
+      if (files.length === 0) return null;
+      // make_timestamptz takes absolute microseconds, so the literal does not
+      // depend on the connection's TimeZone setting (a plain epoch_ms cast would).
+      const prune = window
+        ? ` WHERE ts_open >= make_timestamptz(${sqlNum(window.fromMs * 1000)}) AND ts_open < make_timestamptz(${sqlNum(window.toMs * 1000)})`
+        : "";
+      return `(SELECT ${EXTERNAL_PROJECTION} FROM read_parquet([${files.join(", ")}])${prune})`;
+    }
     const globs: string[] = [];
     for (const year of new Set(years)) {
       const dir = join(this.barsDir, `symbol=${symbol}`, `tf=${tf}`, `year=${year}`);
       if (existsSync(dir)) globs.push(join(dir, "*.parquet"));
     }
-    return globs;
+    if (globs.length === 0) return null;
+    return `read_parquet([${globs.map((g) => sqlPath(g)).join(", ")}], union_by_name = true)`;
   }
 
   async run(sql: string): Promise<void> {
@@ -133,13 +209,33 @@ export class Store {
   }
 
   async refreshBarsView(): Promise<void> {
+    const branches: string[] = [];
     if (hasParquet(this.barsDir)) {
-      await this.run(`
-        CREATE OR REPLACE VIEW bars AS
+      // Native bars; an external symbol's bars are never read from here.
+      const external = [...this.externals.keys()];
+      const skip =
+        external.length > 0
+          ? `WHERE symbol NOT IN (${external.map((x) => sqlStr(x)).join(", ")})`
+          : "";
+      branches.push(`
         SELECT symbol, tf, ts, open, high, low, close, volume, contract
         FROM read_parquet(${sqlPath(this.barsDir + "/**/*.parquet")},
                           hive_partitioning = true, union_by_name = true)
-      `);
+        ${skip}`);
+    }
+    for (const e of this.externals.values()) {
+      const dir = join(e.root, e.name);
+      if (!hasParquet(dir)) {
+        throw new Error(
+          `external bars for '${e.symbol}': no parquet files under ${dir} (check external.root / external.name in the config)`,
+        );
+      }
+      branches.push(`
+        SELECT ${sqlStr(e.symbol)} AS symbol, ${sqlStr(e.tf)} AS tf, ${EXTERNAL_PROJECTION}
+        FROM read_parquet(${sqlPath(join(dir, "*.parquet"))})`);
+    }
+    if (branches.length > 0) {
+      await this.run(`CREATE OR REPLACE VIEW bars AS ${branches.join(" UNION ALL ")}`);
     } else {
       await this.run(`
         CREATE OR REPLACE VIEW bars AS
@@ -180,6 +276,7 @@ export class Store {
    * dropped (idempotent incremental sync); the caller owns watermarking.
    */
   async ingestBars(rows: BarRow[], afterTs: number | null): Promise<IngestResult> {
+    for (const r of rows) this.refuseExternal(r.symbol, "ingest bars into");
     const fresh = (afterTs === null ? rows : rows.filter((r) => r.ts > afterTs))
       .slice()
       .sort((a, b) => a.ts - b.ts)
@@ -226,6 +323,7 @@ export class Store {
 
   /** Drop all bars for a symbol (full re-sync path). */
   async dropBars(symbol: string, tf: string): Promise<void> {
+    this.refuseExternal(symbol, "drop bars of");
     const symbolDir = join(this.barsDir, `symbol=${symbol}`, `tf=${tf}`);
     rmSync(symbolDir, { recursive: true, force: true });
     await this.refreshBarsView();

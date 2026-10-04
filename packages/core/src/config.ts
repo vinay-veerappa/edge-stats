@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { z } from "zod";
+import type { ExternalBarSource } from "./store/store";
 
 const HHMM = /^([01]\d|2[0-4]):[0-5]\d$/;
 
@@ -16,9 +17,27 @@ export const sessionDefSchema = z.object({
 });
 export type SessionDef = z.infer<typeof sessionDefSchema>;
 
-export const symbolConfigSchema = z.object({
+/**
+ * Bars that live outside this data directory and are read in place, never
+ * copied: `<root>/<name>/<YYYY>.parquet` (open-stamped `ts_open`). The engine
+ * only reads them; sync derives features from them and never writes or drops.
+ */
+export const externalBarsSchema = z.object({
+  /** Directory holding one sub-directory per root, e.g. `<store>/bars/1m`. */
+  root: z.string().min(1),
+  /** The root's sub-directory (and the symbol it is read as), e.g. `NQ`. */
+  name: z.string().min(1),
+});
+export type ExternalBars = z.infer<typeof externalBarsSchema>;
+
+export const EXTERNAL_ADAPTER = "external";
+
+const symbolConfigObject = z.object({
   symbol: z.string().min(1),
-  adapter: z.string().min(1),
+  /** Required for a native symbol; an external symbol needs none (reported as "external"). */
+  adapter: z.string().min(1).optional(),
+  /** Read this symbol's bars in place from an external store instead of syncing a copy. */
+  external: externalBarsSchema.optional(),
   assetClass: z.enum(["equity", "future", "crypto", "forex"]),
   /** Which holiday/session calendar to use. Defaults by asset class. */
   exchange: z.enum(["NYSE", "CME", "CRYPTO", "FX"]).optional(),
@@ -32,6 +51,26 @@ export const symbolConfigSchema = z.object({
   /** Initial-balance window (minutes). */
   ibWindow: z.number().int().positive().default(60),
   adapterOptions: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const symbolConfigSchema = symbolConfigObject.transform((s, ctx) => {
+  if (s.external !== undefined && s.adapter !== undefined && s.adapter !== EXTERNAL_ADAPTER) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["adapter"],
+      message: `symbol '${s.symbol}' has an external bar source, so its adapter must be omitted or "${EXTERNAL_ADAPTER}"`,
+    });
+    return z.NEVER;
+  }
+  if (s.external === undefined && s.adapter === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["adapter"],
+      message: `symbol '${s.symbol}' needs an adapter (or an external bar source)`,
+    });
+    return z.NEVER;
+  }
+  return { ...s, adapter: s.adapter ?? EXTERNAL_ADAPTER };
 });
 export type SymbolConfig = z.infer<typeof symbolConfigSchema>;
 
@@ -121,6 +160,21 @@ export function loadConfig(dir?: string): LoadedConfig {
     );
   }
   return parseConfig(JSON.parse(raw), configPath);
+}
+
+/** The symbols whose bars are read in place, ready for `Store.open`. Relative roots resolve against the config's directory. */
+export function externalBarSources(config: EdgeStatsConfig, rootDir?: string): ExternalBarSource[] {
+  const out: ExternalBarSource[] = [];
+  for (const s of config.symbols) {
+    if (!s.external) continue;
+    out.push({
+      symbol: s.symbol,
+      tf: s.tf,
+      name: s.external.name,
+      root: rootDir ? resolve(rootDir, s.external.root) : resolve(s.external.root),
+    });
+  }
+  return out;
 }
 
 export function findSymbol(config: EdgeStatsConfig, symbol: string): SymbolConfig {

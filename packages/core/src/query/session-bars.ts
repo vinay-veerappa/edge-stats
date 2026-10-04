@@ -19,7 +19,7 @@ import type { EdgeStatsConfig, SymbolConfig } from "../config";
 import { findSymbol, parseTfMs } from "../config";
 import { QueryError } from "../registry";
 import type { Store } from "../store/store";
-import { sqlNum, sqlPath, sqlStr } from "../util/sql";
+import { sqlNum, sqlStr } from "../util/sql";
 import { asBool, asInt, asNum, asStr } from "../util/values";
 import { compileCtxFor } from "./execute";
 import { DISCLAIMER } from "./execute";
@@ -246,13 +246,13 @@ export async function getSessionBars(
   // when the context lookback crosses into the previous year. Nothing else
   // in the store is opened.
   const contextFrom = startTs - CONTEXT_LOOKBACK_MS;
-  const globs = store.barPartitionGlobs(symbolName, tf, yearsSpanning(contextFrom, endTs));
+  const years = yearsSpanning(contextFrom, endTs);
+  const sessionSource = store.barSource(symbolName, tf, years, { fromMs: startTs, toMs: endTs });
   let bars: SessionBar[] = [];
   let context: SessionBar[] = [];
-  if (globs.length > 0) {
-    const source = `read_parquet([${globs.map((g) => sqlPath(g)).join(", ")}], union_by_name = true)`;
+  if (sessionSource !== null) {
     const sessionRows = await store.all(`
-      SELECT ts, open, high, low, close, volume FROM ${source}
+      SELECT ts, open, high, low, close, volume FROM ${sessionSource}
       WHERE ts >= ${sqlNum(startTs)} AND ts < ${sqlNum(endTs)}
       ORDER BY ts LIMIT ${MAX_SESSION_BARS + 1}
     `);
@@ -263,9 +263,13 @@ export async function getSessionBars(
       );
     }
     bars = sessionRows.map(toBar);
-    if (contextBars > 0) {
+    const contextSource = store.barSource(symbolName, tf, years, {
+      fromMs: contextFrom,
+      toMs: startTs,
+    });
+    if (contextBars > 0 && contextSource !== null) {
       const contextRows = await store.all(`
-        SELECT ts, open, high, low, close, volume FROM ${source}
+        SELECT ts, open, high, low, close, volume FROM ${contextSource}
         WHERE ts >= ${sqlNum(contextFrom)} AND ts < ${sqlNum(startTs)}
         ORDER BY ts DESC LIMIT ${contextBars}
       `);

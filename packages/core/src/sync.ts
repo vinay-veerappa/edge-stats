@@ -9,6 +9,8 @@ import type { EdgeStatsConfig, SymbolConfig } from "./config";
 import { syncEventsIntoStore } from "./events";
 import { deriveFeatures } from "./features/derive";
 import type { Store } from "./store/store";
+import { sqlStr } from "./util/sql";
+import { asNum } from "./util/values";
 
 export interface SyncOptions {
   symbols?: string[];
@@ -67,6 +69,7 @@ async function syncOne(
   full: boolean,
   log: (msg: string) => void,
 ): Promise<SymbolSyncSummary> {
+  if (symbol.external) return syncExternal(store, symbol, full, log);
   const adapter = getAdapter(symbol.adapter);
   const ctx = {
     symbol,
@@ -103,6 +106,38 @@ async function syncOne(
     barsInserted: inserted,
     barsSkipped: skipped,
     watermark: maxTs,
+  };
+}
+
+/**
+ * An external symbol's bars are read in place from the `bars` view: nothing
+ * is pulled or appended, and the watermark is the view's own `max(ts)`.
+ * Features derive from the view afterwards, exactly as for a native symbol.
+ */
+async function syncExternal(
+  store: Store,
+  symbol: SymbolConfig,
+  full: boolean,
+  log: (msg: string) => void,
+): Promise<SymbolSyncSummary> {
+  if (!store.isExternal(symbol.symbol)) {
+    throw new Error(
+      `symbol '${symbol.symbol}' is configured with external bars but the store was opened without them: pass externalBarSources(config) to Store.open`,
+    );
+  }
+  const row = await store.one(
+    `SELECT max(ts) AS m FROM bars WHERE symbol = ${sqlStr(symbol.symbol)} AND tf = ${sqlStr(symbol.tf)}`,
+  );
+  const watermark = row ? asNum(row.m) : null;
+  log(
+    `${symbol.symbol}: external bars, read in place${full ? " (nothing to re-pull)" : ""}${watermark !== null ? `, last bar ${new Date(watermark).toISOString()}` : ""}`,
+  );
+  return {
+    symbol: symbol.symbol,
+    adapter: symbol.adapter,
+    barsInserted: 0,
+    barsSkipped: 0,
+    watermark,
   };
 }
 
