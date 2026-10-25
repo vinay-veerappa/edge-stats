@@ -1,11 +1,22 @@
 import { sqlNum, sqlStr } from "../util/sql";
-import type { PredicateDef } from "./types";
+import type { PredicateDef, ResolvedArgs } from "./types";
 import { requireWindow } from "./types";
 
 const DIRS = ["up", "down", "any"] as const;
 
 function orCol(minutes: number, col: string): string {
   return `f.or${minutes}_${col}`;
+}
+
+/**
+ * Band edges as fractions of the range. Defaults to the 40-60% middle, but
+ * every predicate that takes them accepts any pair, so a 45-55% or 30-70%
+ * reading costs nothing extra.
+ */
+function band(a: ResolvedArgs): { lo: number; hi: number } {
+  const lo = typeof a.lo === "number" ? a.lo : 0.4;
+  const hi = typeof a.hi === "number" ? a.hi : 0.6;
+  return { lo, hi };
 }
 
 export const predicates: PredicateDef[] = [
@@ -76,6 +87,158 @@ export const predicates: PredicateDef[] = [
           : `${orCol(w, "first_break")} = ${sqlStr(dir)}`;
       return `(${dirCond} AND ${orCol(w, "false_break")})`;
     },
+  },
+  {
+    kind: "predicate",
+    name: "orbCloseBroke",
+    title: "Opening range broke on a bar close",
+    doc: "A bar CLOSED beyond the opening-range boundary instead of merely wicking through it. The close-confirmed counterpart of orbBroke, which is touch-based.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Close-break direction" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_close_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_close_break")} = ${sqlStr(dir)}`;
+    },
+    examples: ["orbBreak(30m, up) WHERE orbCloseBroke(30m, up)"],
+    library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "predicate",
+    name: "orbWickOnlyBroke",
+    title: "Opening range broke by wick only",
+    doc: "Price traded beyond the boundary at some point but no bar ever closed beyond it. The complement of orbCloseBroke, and the cleanest way to separate a stop-run from a real break.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Wick-break direction" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      const up = `${orCol(w, "up_wick_only")}`;
+      const dn = `${orCol(w, "dn_wick_only")}`;
+      if (dir === "up") return up;
+      if (dir === "down") return dn;
+      return `(${up} OR ${dn})`;
+    },
+  },
+  {
+    kind: "predicate",
+    name: "orbHeldBand",
+    title: "Opening range held the mid band",
+    doc: "After the first break, no bar close ever gave back the band. For an up break that means every close stayed above the band's upper edge; for a down break, below its lower edge. The strict 'held' definition.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Break direction" },
+      { name: "lo", type: "number", default: 0.4, doc: "Band lower edge as a fraction of the range" },
+      { name: "hi", type: "number", default: 0.6, doc: "Band upper edge as a fraction of the range" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const { lo, hi } = band(a);
+      const up = `(${orCol(w, "first_break")} = 'up' AND ${orCol(w, "up_min_close_pos")} > ${sqlNum(hi)})`;
+      const dn = `(${orCol(w, "first_break")} = 'down' AND ${orCol(w, "dn_max_close_pos")} < ${sqlNum(lo)})`;
+      const dir = a.dir as string;
+      if (dir === "up") return up;
+      if (dir === "down") return dn;
+      return `(${up} OR ${dn})`;
+    },
+  },
+  {
+    kind: "predicate",
+    name: "orbRetestedBand",
+    title: "Opening range retested the mid band",
+    doc: "After the first break, at least one bar close traded back to the band. A retest is not a failure — pair it with the close position to tell a held retest from a reversal.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Break direction" },
+      { name: "lo", type: "number", default: 0.4, doc: "Band lower edge as a fraction of the range" },
+      { name: "hi", type: "number", default: 0.6, doc: "Band upper edge as a fraction of the range" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const { lo, hi } = band(a);
+      const up = `(${orCol(w, "first_break")} = 'up' AND ${orCol(w, "up_min_close_pos")} <= ${sqlNum(hi)})`;
+      const dn = `(${orCol(w, "first_break")} = 'down' AND ${orCol(w, "dn_max_close_pos")} >= ${sqlNum(lo)})`;
+      const dir = a.dir as string;
+      if (dir === "up") return up;
+      if (dir === "down") return dn;
+      return `(${up} OR ${dn})`;
+    },
+  },
+  {
+    kind: "predicate",
+    name: "orbClosedInBand",
+    title: "Session closed in the mid band",
+    doc: "The session's final close landed inside the band, measured in 0..1 range space. The 'gave it all back' definition of a failed continuation.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Restrict to breaks in this direction" },
+      { name: "lo", type: "number", default: 0.4, doc: "Band lower edge as a fraction of the range" },
+      { name: "hi", type: "number", default: 0.6, doc: "Band upper edge as a fraction of the range" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const { lo, hi } = band(a);
+      const inside = `${orCol(w, "close_pos")} BETWEEN ${sqlNum(lo)} AND ${sqlNum(hi)}`;
+      const dir = a.dir as string;
+      if (dir === "any") return inside;
+      return `(${orCol(w, "first_break")} = ${sqlStr(dir)} AND ${inside})`;
+    },
+  },
+  {
+    kind: "predicate",
+    name: "orbMidTestedBy",
+    title: "Opening range mid tested by N minutes",
+    doc: "After the first break, a bar CLOSE traded back into the mid band by N minutes from the session open. Use cumulative thresholds 5, 10, 15... to build 5-minute buckets.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Break direction" },
+      { name: "minutes", type: "number", required: true, doc: "Minutes from the session open" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const m = sqlNum(a.minutes as number);
+      const up = `(${orCol(w, "first_break")} = 'up' AND ${orCol(w, "up_band_enter_min")} <= ${m})`;
+      const dn = `(${orCol(w, "first_break")} = 'down' AND ${orCol(w, "dn_band_enter_min")} <= ${m})`;
+      const dir = a.dir as string;
+      if (dir === "up") return up;
+      if (dir === "down") return dn;
+      return `(${up} OR ${dn})`;
+    },
+  },
+  {
+    kind: "predicate",
+    name: "orbMidNeverTested",
+    title: "Opening range mid never retested",
+    doc: "After the first break, no bar close ever traded back into the mid band. The cleanest 'held cleanly' condition.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Break direction" },
+    ],
+    sql: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const up = `(${orCol(w, "first_break")} = 'up' AND ${orCol(w, "up_band_enter_min")} IS NULL)`;
+      const dn = `(${orCol(w, "first_break")} = 'down' AND ${orCol(w, "dn_band_enter_min")} IS NULL)`;
+      const dir = a.dir as string;
+      if (dir === "up") return up;
+      if (dir === "down") return dn;
+      return `(${up} OR ${dn})`;
+    },
+  },
+  {
+    kind: "predicate",
+    name: "orbSecondBreakBy",
+    title: "Second side broken by N minutes",
+    doc: "Among double breaks, the second side was taken within N minutes of the session open. Cumulative thresholds give you the time distribution of double breaks.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "minutes", type: "number", required: true, doc: "Minutes from the session open" },
+    ],
+    sql: (a, ctx) => `${orCol(requireWindow(a.window as number, ctx), "break2_min")} <= ${sqlNum(a.minutes as number)}`,
   },
   {
     kind: "predicate",

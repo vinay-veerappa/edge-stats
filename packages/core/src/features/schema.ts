@@ -92,6 +92,10 @@ export const BASE_COLUMNS: ColumnSpec[] = [
   { name: "swept_high_first", type: "BOOLEAN" },
 ];
 
+/** Default mid band, as fractions of the range. One place to change it. */
+export const BAND_LO = 0.4;
+export const BAND_HI = 0.6;
+
 export function orColumns(window: number): ColumnSpec[] {
   const p = `or${window}_`;
   return [
@@ -104,6 +108,32 @@ export function orColumns(window: number): ColumnSpec[] {
     { name: `${p}broke_both`, type: "BOOLEAN" },
     { name: `${p}ext_up_r`, type: "DOUBLE" },
     { name: `${p}ext_dn_r`, type: "DOUBLE" },
+    // Midpoint geometry. Generic to ANY time-based range, so every window
+    // (ORB, initial balance, custom) gets these for free.
+    //
+    // The touch-based break above answers "did price poke beyond the range".
+    // These answer the two questions that actually decide continuation:
+    //   * did a BAR CLOSE confirm the break (close vs wick), and
+    //   * where did price sit inside the range afterwards, in 0..1 range
+    //     space, so "the 40-60% band" is expressible.
+    { name: `${p}mid`, type: "DOUBLE" },
+    { name: `${p}close_pos`, type: "DOUBLE" },
+    { name: `${p}up_close_ts`, type: "BIGINT" },
+    { name: `${p}dn_close_ts`, type: "BIGINT" },
+    { name: `${p}first_close_break`, type: "VARCHAR" },
+    { name: `${p}false_close_break`, type: "BOOLEAN" },
+    { name: `${p}up_wick_only`, type: "BOOLEAN" },
+    { name: `${p}dn_wick_only`, type: "BOOLEAN" },
+    { name: `${p}up_min_close_pos`, type: "DOUBLE" },
+    { name: `${p}dn_max_close_pos`, type: "DOUBLE" },
+    // Timing, in minutes from the session open. These answer "WHEN", which
+    // the position columns above cannot: where price ended up says nothing
+    // about whether it tested the mid at 10:10 or 10:40.
+    { name: `${p}up_break_min`, type: "INTEGER" },
+    { name: `${p}dn_break_min`, type: "INTEGER" },
+    { name: `${p}break2_min`, type: "INTEGER" },
+    { name: `${p}up_band_enter_min`, type: "INTEGER" },
+    { name: `${p}dn_band_enter_min`, type: "INTEGER" },
   ];
 }
 

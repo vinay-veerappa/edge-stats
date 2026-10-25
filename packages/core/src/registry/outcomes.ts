@@ -218,6 +218,123 @@ export const outcomes: OutcomeDef[] = [
   },
   {
     kind: "outcome",
+    name: "orbCloseBreak",
+    title: "Opening range close-confirmed break",
+    doc: "Of the sessions with a formed opening range, how often a bar CLOSED beyond the boundary in the given direction. Compare with orbBreak, which counts a mere touch.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Close-break direction" },
+    ],
+    eligibility: (a, ctx) => `${orCol(requireWindow(a.window as number, ctx), "high")} IS NOT NULL`,
+    success: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_close_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_close_break")} = ${sqlStr(dir)}`;
+    },
+    examples: ["orbCloseBreak(30m, up)"],
+    library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "outcome",
+    name: "orbCloseContinuation",
+    title: "Opening range continuation held to the close",
+    doc: "Of the sessions whose first CLOSE-confirmed break went in the given direction, how often the session's final close was still beyond that boundary. The close-confirmed counterpart of orbFalseBreak, and the honest test of continuation.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Direction of the first close break" },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_close_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_close_break")} = ${sqlStr(dir)}`;
+    },
+    success: (a, ctx) => `coalesce(NOT ${orCol(requireWindow(a.window as number, ctx), "false_close_break")}, FALSE)`,
+    examples: ["orbCloseContinuation(30m, up)"],
+    library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "outcome",
+    name: "orbClosePos",
+    title: "Where the session closed inside the range",
+    doc: "Of the sessions whose first close-confirmed break went in the given direction, the distribution of the session's final close expressed in 0..1 range space (0 = range low, 1 = range high, beyond 0..1 = closed outside). Success = the close was still beyond the broken boundary.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Direction of the first close break" },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_close_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_close_break")} = ${sqlStr(dir)}`;
+    },
+    success: (a, ctx) => `coalesce(NOT ${orCol(requireWindow(a.window as number, ctx), "false_close_break")}, FALSE)`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "close_pos"),
+      unit: "ratio",
+      doc: "Session close position within the opening range; 0 = low, 1 = high.",
+    },
+    examples: ["orbClosePos(30m, up) WHERE eventDay('NEWS_0945')"],
+    library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "outcome",
+    name: "orbMidTestMin",
+    title: "Minutes to the mid-band retest",
+    doc: "Of the sessions that broke in the given direction, how often and how soon a bar close traded back into the mid band. The value distribution is the full time-of-retest profile.",
+    args: [
+      { name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" },
+      { name: "dir", type: "enum", values: DIRS, default: "any", doc: "Break direction" },
+    ],
+    eligibility: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "any") return `${orCol(w, "first_break")} IN ('up', 'down')`;
+      return `${orCol(w, "first_break")} = ${sqlStr(dir)}`;
+    },
+    success: (a, ctx) => {
+      const w = requireWindow(a.window as number, ctx);
+      const dir = a.dir as string;
+      if (dir === "up") return `${orCol(w, "up_band_enter_min")} IS NOT NULL`;
+      if (dir === "down") return `${orCol(w, "dn_band_enter_min")} IS NOT NULL`;
+      return `(CASE ${orCol(w, "first_break")}
+        WHEN 'up' THEN ${orCol(w, "up_band_enter_min")}
+        WHEN 'down' THEN ${orCol(w, "dn_band_enter_min")}
+        ELSE NULL END) IS NOT NULL`;
+    },
+    value: {
+      sql: (a, ctx) => {
+        const w = requireWindow(a.window as number, ctx);
+        return `(CASE ${orCol(w, "first_break")}
+          WHEN 'up' THEN ${orCol(w, "up_band_enter_min")}
+          WHEN 'down' THEN ${orCol(w, "dn_band_enter_min")}
+          ELSE NULL END)`;
+      },
+      unit: "minutes",
+      doc: "Minutes from the session open to the first close back inside the mid band.",
+    },
+    examples: ["orbMidTestMin(30m, up) WHERE eventDay('NEWS_0945')"],
+    library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "outcome",
+    name: "orbSecondBreakMin",
+    title: "Minutes to the second side breaking",
+    doc: "Of the sessions that broke BOTH sides of the range, when the second side was taken. The value distribution is the double-break timing profile.",
+    args: [{ name: "window", type: "duration", required: true, doc: "Opening-range window, e.g. 30m" }],
+    eligibility: (a, ctx) => `${orCol(requireWindow(a.window as number, ctx), "broke_both")}`,
+    success: () => `TRUE`,
+    value: {
+      sql: (a, ctx) => orCol(requireWindow(a.window as number, ctx), "break2_min"),
+      unit: "minutes",
+      doc: "Minutes from the session open to the second side's first break.",
+    },
+    examples: ["orbSecondBreakMin(30m) WHERE eventDay('NEWS_1000')"],
+    library: [{ kind: "indicator", slug: "ultimate-opening-range-breakout" }],
+  },
+  {
+    kind: "outcome",
     name: "ibExtension",
     title: "Initial balance extension",
     doc: "Of the sessions that broke their initial balance in the given direction, how often price extended at least r × the IB range beyond the broken side.",

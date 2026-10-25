@@ -30,7 +30,7 @@ import { derivableSessionKeys } from "../calendar/sessions";
 import type { Store } from "../store/store";
 import { sqlNum, sqlPath, sqlStr } from "../util/sql";
 import { asInt, asNum, asStr, round } from "../util/values";
-import { featureColumns, featuresDdl } from "./schema";
+import { BAND_HI, BAND_LO, featureColumns, featuresDdl } from "./schema";
 
 const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
@@ -62,6 +62,12 @@ interface OrRow {
   dnTs: number | null;
   postHigh: number | null;
   postLow: number | null;
+  upCloseTs: number | null;
+  dnCloseTs: number | null;
+  upMinClosePos: number | null;
+  dnMaxClosePos: number | null;
+  upBandTs: number | null;
+  dnBandTs: number | null;
 }
 
 interface FvgZone {
@@ -85,14 +91,35 @@ function gapBucket(absPct: number): string {
 }
 
 async function ensureFeaturesTable(store: Store, windows: number[]): Promise<boolean> {
-  const wanted = featureColumns(windows).map((c) => c.name);
+  const specs = featureColumns(windows);
+  const wanted = specs.map((c) => c.name);
   const existing = await store
     .all(`SELECT name FROM pragma_table_info('session_features')`)
     .catch(() => null);
+
+  // Returning true means "the table was rebuilt, every symbol needs deriving".
+  // Adding columns keeps existing rows, so a scoped re-derive is enough.
   if (existing !== null && existing.length > 0) {
-    const have = new Set(existing.map((r) => asStr(r.name)));
-    if (wanted.every((c) => have.has(c)) && have.size === wanted.length) return false;
-    await store.run("DROP TABLE session_features");
+    const haveNames = existing
+      .map((r) => asStr(r.name))
+      .filter((n): n is string => n !== null);
+    const have = new Set(haveNames);
+    const wantedSet = new Set(wanted);
+    const removed = haveNames.filter((c) => !wantedSet.has(c));
+    if (removed.length > 0) {
+      // Columns disappeared: the row shape changed, so rebuild.
+      await store.run("DROP TABLE session_features");
+      await store.run(featuresDdl(windows));
+      return true;
+    }
+    const missing = specs.filter((c) => !have.has(c.name));
+    if (missing.length === 0) return false;
+    // Additive change: ALTER instead of DROP so no symbol loses its history.
+    // The new columns stay NULL until each symbol is derived again.
+    for (const col of missing) {
+      await store.run(`ALTER TABLE session_features ADD COLUMN ${col.name} ${col.type}`);
+    }
+    return false;
   }
   await store.run(featuresDdl(windows));
   return true;
@@ -110,6 +137,8 @@ function unionWindows(config: EdgeStatsConfig): number[] {
 
 export interface DeriveOptions {
   symbols?: string[];
+  /** Restrict to specific session keys. Symbol configs can carry ~90 of them. */
+  sessionKeys?: string[];
   log?: (msg: string) => void;
 }
 
@@ -129,6 +158,7 @@ export async function deriveFeatures(
   const summaries: DeriveSummary[] = [];
   for (const symbol of symbols) {
     for (const sessionKey of derivableSessionKeys(symbol)) {
+      if (opts.sessionKeys && !opts.sessionKeys.includes(sessionKey)) continue;
       const count = await deriveOne(store, symbol, sessionKey, windows, resolver, log);
       summaries.push({ symbol: symbol.symbol, sessionKey, sessions: count });
     }
@@ -212,6 +242,8 @@ async function deriveOne(
       (w) => `
       min(b.ts) FILTER (WHERE b.ts >= s.start_ts + ${w * 60000} AND b.high > s.or${w}_high) AS or${w}_up_ts,
       min(b.ts) FILTER (WHERE b.ts >= s.start_ts + ${w * 60000} AND b.low < s.or${w}_low) AS or${w}_dn_ts,
+      min(b.ts) FILTER (WHERE b.ts >= s.start_ts + ${w * 60000} AND b.close > s.or${w}_high) AS or${w}_up_close_ts,
+      min(b.ts) FILTER (WHERE b.ts >= s.start_ts + ${w * 60000} AND b.close < s.or${w}_low) AS or${w}_dn_close_ts,
       max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${w * 60000}) AS or${w}_post_high,
       min(b.low) FILTER (WHERE b.ts >= s.start_ts + ${w * 60000}) AS or${w}_post_low`,
     )
@@ -226,10 +258,42 @@ async function deriveOne(
     GROUP BY s.trade_date
   `);
 
+  // S3: where price sat INSIDE the range after the first break, expressed in
+  // 0..1 range space. This is what makes "held above the 40-60% band"
+  // expressible as a plain comparison, and it is direction-aware so bars
+  // before the break cannot be mistaken for a retest.
+  const orRetraceSelects = windows
+    .map(
+      (w) => `
+      min((b.close - s1.or${w}_low) / nullif(s1.or${w}_high - s1.or${w}_low, 0))
+        FILTER (WHERE s2.or${w}_up_ts IS NOT NULL AND b.ts > s2.or${w}_up_ts) AS or${w}_up_min_close_pos,
+      max((b.close - s1.or${w}_low) / nullif(s1.or${w}_high - s1.or${w}_low, 0))
+        FILTER (WHERE s2.or${w}_dn_ts IS NOT NULL AND b.ts > s2.or${w}_dn_ts) AS or${w}_dn_max_close_pos,
+      min(b.ts) FILTER (
+        WHERE s2.or${w}_up_ts IS NOT NULL AND b.ts > s2.or${w}_up_ts
+          AND (b.close - s1.or${w}_low) / nullif(s1.or${w}_high - s1.or${w}_low, 0) <= ${BAND_HI}
+      ) AS or${w}_up_band_ts,
+      min(b.ts) FILTER (
+        WHERE s2.or${w}_dn_ts IS NOT NULL AND b.ts > s2.or${w}_dn_ts
+          AND (b.close - s1.or${w}_low) / nullif(s1.or${w}_high - s1.or${w}_low, 0) >= ${BAND_LO}
+      ) AS or${w}_dn_band_ts`,
+    )
+    .join(",");
+  await store.run(`
+    CREATE OR REPLACE TEMP TABLE _s3 AS
+    SELECT s2.trade_date, ${orRetraceSelects}
+    FROM _s2 s2
+    JOIN _s1 s1 ON s1.trade_date = s2.trade_date
+    JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s1.start_ts AND b.ts < s1.end_ts
+    GROUP BY s2.trade_date
+  `);
+
   const s1Rows = await store.all(`
-    SELECT s1.*, s2.* EXCLUDE (trade_date),
+    SELECT s1.*, s2.* EXCLUDE (trade_date), s3.* EXCLUDE (trade_date),
       CAST(s1.trade_date AS VARCHAR) AS trade_date_str
-    FROM _s1 s1 JOIN _s2 s2 USING (trade_date)
+    FROM _s1 s1
+    JOIN _s2 s2 USING (trade_date)
+    JOIN _s3 s3 USING (trade_date)
     ORDER BY s1.trade_date
   `);
 
@@ -244,6 +308,12 @@ async function deriveOne(
         dnTs: asNum(r[`or${w}_dn_ts`]),
         postHigh: asNum(r[`or${w}_post_high`]),
         postLow: asNum(r[`or${w}_post_low`]),
+        upCloseTs: asNum(r[`or${w}_up_close_ts`]),
+        dnCloseTs: asNum(r[`or${w}_dn_close_ts`]),
+        upMinClosePos: asNum(r[`or${w}_up_min_close_pos`]),
+        dnMaxClosePos: asNum(r[`or${w}_dn_max_close_pos`]),
+        upBandTs: asNum(r[`or${w}_up_band_ts`]),
+        dnBandTs: asNum(r[`or${w}_dn_band_ts`]),
       });
     }
     return {
@@ -502,6 +572,21 @@ async function deriveOne(
         row[`${p}broke_both`] = null;
         row[`${p}ext_up_r`] = null;
         row[`${p}ext_dn_r`] = null;
+        row[`${p}mid`] = null;
+        row[`${p}close_pos`] = null;
+        row[`${p}up_close_ts`] = null;
+        row[`${p}dn_close_ts`] = null;
+        row[`${p}first_close_break`] = null;
+        row[`${p}false_close_break`] = null;
+        row[`${p}up_wick_only`] = null;
+        row[`${p}dn_wick_only`] = null;
+        row[`${p}up_min_close_pos`] = null;
+        row[`${p}dn_max_close_pos`] = null;
+        row[`${p}up_break_min`] = null;
+        row[`${p}dn_break_min`] = null;
+        row[`${p}break2_min`] = null;
+        row[`${p}up_band_enter_min`] = null;
+        row[`${p}dn_band_enter_min`] = null;
         continue;
       }
       const range = o.high - o.low;
@@ -514,6 +599,16 @@ async function deriveOne(
       const firstTs = first === "up" ? o.upTs : first === "down" ? o.dnTs : null;
       const falseBreak =
         first === "up" ? cur.close < o.high : first === "down" ? cur.close > o.low : null;
+      // Close-confirmed break: same tie-break rule as the touch-based one, so
+      // the two definitions stay directly comparable.
+      const firstClose =
+        o.upCloseTs !== null && (o.dnCloseTs === null || o.upCloseTs <= o.dnCloseTs)
+          ? "up"
+          : o.dnCloseTs !== null
+            ? "down"
+            : "none";
+      const falseCloseBreak =
+        firstClose === "up" ? cur.close < o.high : firstClose === "down" ? cur.close > o.low : null;
       row[`${p}high`] = o.high;
       row[`${p}low`] = o.low;
       row[`${p}range`] = range;
@@ -521,6 +616,27 @@ async function deriveOne(
       row[`${p}break_min`] = firstTs !== null ? Math.floor((firstTs - cur.startTs) / 60000) : null;
       row[`${p}false_break`] = falseBreak;
       row[`${p}broke_both`] = o.upTs !== null && o.dnTs !== null;
+      row[`${p}mid`] = (o.high + o.low) / 2;
+      row[`${p}close_pos`] = range > 0 ? (cur.close - o.low) / range : null;
+      row[`${p}up_close_ts`] = o.upCloseTs;
+      row[`${p}dn_close_ts`] = o.dnCloseTs;
+      row[`${p}first_close_break`] = firstClose;
+      row[`${p}false_close_break`] = falseCloseBreak;
+      row[`${p}up_wick_only`] = o.upTs !== null && o.upCloseTs === null;
+      row[`${p}dn_wick_only`] = o.dnTs !== null && o.dnCloseTs === null;
+      row[`${p}up_min_close_pos`] = o.upMinClosePos;
+      row[`${p}dn_max_close_pos`] = o.dnMaxClosePos;
+      // Timing in minutes from the session open (09:30 for ny_am_0930_1100),
+      // so a bucket boundary maps straight onto a clock time.
+      const mins = (ts: number | null) =>
+        ts === null ? null : Math.floor((ts - cur.startTs) / 60000);
+      row[`${p}up_break_min`] = mins(o.upTs);
+      row[`${p}dn_break_min`] = mins(o.dnTs);
+      // Second side to break: the later of the two first breaches.
+      row[`${p}break2_min`] =
+        o.upTs !== null && o.dnTs !== null ? mins(Math.max(o.upTs, o.dnTs)) : null;
+      row[`${p}up_band_enter_min`] = mins(o.upBandTs);
+      row[`${p}dn_band_enter_min`] = mins(o.dnBandTs);
       row[`${p}ext_up_r`] =
         o.upTs !== null && o.postHigh !== null && range > 0
           ? round(Math.max(0, o.postHigh - o.high) / range, 6)
