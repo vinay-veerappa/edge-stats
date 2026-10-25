@@ -458,6 +458,34 @@ async function deriveOne(
       prev_nr7: usePrev ? (out[out.length - 1]?.nr7 ?? null) : null,
       prev_doji: usePrev ? (out[out.length - 1]?.doji ?? null) : null,
       ib_break: null,
+      // Candle Science & Liquidity Sweep features
+      c1_dir: usePrev && out.length >= 2 && out[out.length - 2]?.green !== null
+        ? (out[out.length - 2].green ? "bull" : "bear")
+        : null,
+      c2_dir: usePrev && out.length >= 1 && out[out.length - 1]?.green !== null
+        ? (out[out.length - 1].green ? "bull" : "bear")
+        : null,
+      c1_c2_pattern:
+        usePrev &&
+        out.length >= 2 &&
+        out[out.length - 2]?.green !== null &&
+        out[out.length - 1]?.green !== null
+          ? `${out[out.length - 2].green ? "BULL" : "BEAR"}_${out[out.length - 1].green ? "BULL" : "BEAR"}`
+          : null,
+      c3_open_pos:
+        prevHigh !== null && prevLow !== null
+          ? cur.open > prevHigh
+            ? "gap_up"
+            : cur.open < prevLow
+              ? "gap_down"
+              : "inside"
+          : null,
+      mfe_bps: cur.open !== 0 ? round(((cur.high - cur.open) / cur.open) * 10000, 2) : null,
+      mae_bps: cur.open !== 0 ? round(((cur.low - cur.open) / cur.open) * 10000, 2) : null,
+      pdl_swept: null,
+      pdh_swept: null,
+      swept_low_first: null,
+      swept_high_first: null,
     };
 
     // Opening-range features
@@ -598,6 +626,14 @@ async function deriveOne(
         row.touch_prev_high_min = touchPh !== null ? Math.floor((touchPh - startTs) / 60000) : null;
         row.touched_prev_low = touchPl !== null;
         row.touch_prev_low_min = touchPl !== null ? Math.floor((touchPl - startTs) / 60000) : null;
+
+        const close = row.close as number;
+        const prevHigh = row.prev_high as number;
+        const prevLow = row.prev_low as number;
+        row.pdl_swept = touchPl !== null && close > prevLow;
+        row.pdh_swept = touchPh !== null && close < prevHigh;
+        row.swept_low_first = touchPl !== null && (touchPh === null || touchPl < touchPh);
+        row.swept_high_first = touchPh !== null && (touchPl === null || touchPh < touchPl);
       }
       const gapDir = row.gap_dir as string | null;
       if (gapDir === "up" || gapDir === "down") {

@@ -168,7 +168,10 @@ export const inputClass =
   "h-8 w-full min-w-0 rounded-lg border border-border bg-white/[0.03] px-2.5 text-[13px] text-foreground " +
   "placeholder:text-faint transition-colors duration-150 hover:border-white/20 focus:border-white/30 focus:outline-none";
 
-const selectClass = cn(inputClass, "appearance-none pr-7");
+const selectClass = cn(
+  inputClass,
+  "appearance-none pr-7 bg-[#0a0a0a] [&>option]:bg-[#0a0a0a] [&>option]:text-foreground"
+);
 
 /**
  * Styled native select: full keyboard and screen-reader behavior for free,

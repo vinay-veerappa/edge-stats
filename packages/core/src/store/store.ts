@@ -53,6 +53,8 @@ export interface ExternalBarSource {
 export interface StoreOptions {
   /** Symbols read in place; they are never copied, ingested into, or dropped. */
   external?: ExternalBarSource[];
+  /** Optional SQLite database for economic events (dev.db). */
+  economicDb?: string;
 }
 
 export interface IngestResult {
@@ -83,14 +85,17 @@ const EXTERNAL_PROJECTION = `epoch_ms(ts_open) AS ts, open, high, low, close,
 
 export class Store {
   private readonly externals: Map<string, ExternalBarSource>;
+  private readonly economicDb?: string;
 
   private constructor(
     readonly dataDir: string,
     private readonly instance: DuckDBInstance,
     private readonly conn: DuckDBConnection,
     externals: ExternalBarSource[],
+    economicDb?: string,
   ) {
     this.externals = new Map(externals.map((e) => [e.symbol, e]));
+    this.economicDb = economicDb;
   }
 
   static async open(dataDir: string, opts: StoreOptions = {}): Promise<Store> {
@@ -99,10 +104,11 @@ export class Store {
     mkdirSync(join(dataDir, "tmp"), { recursive: true });
     const instance = await DuckDBInstance.create(join(dataDir, "edge-stats.duckdb"));
     const conn = await instance.connect();
-    const store = new Store(dataDir, instance, conn, opts.external ?? []);
+    const store = new Store(dataDir, instance, conn, opts.external ?? [], opts.economicDb);
     try {
       await store.ensureSchema();
       await store.refreshBarsView();
+      await store.refreshEventsView();
     } catch (err) {
       // a refused open (e.g. a missing external directory) must not keep the db file locked
       await store.close();
@@ -193,9 +199,6 @@ export class Store {
         symbol VARCHAR, tf VARCHAR, adapter VARCHAR,
         last_ts BIGINT, updated_at TIMESTAMP DEFAULT now(),
         PRIMARY KEY (symbol, tf, adapter)
-      );
-      CREATE TABLE IF NOT EXISTS events (
-        date DATE, event VARCHAR, detail VARCHAR
       );
       CREATE TABLE IF NOT EXISTS meta (
         key VARCHAR PRIMARY KEY, value VARCHAR
@@ -329,8 +332,124 @@ export class Store {
     await this.refreshBarsView();
   }
 
+  async refreshEventsView(): Promise<void> {
+    // Check if legacy 'events' base table exists and migrate to events_static if so
+    const tableCheck = await this.one(`
+      SELECT count(*) as c FROM information_schema.tables 
+      WHERE table_name = 'events' AND table_type = 'BASE TABLE'
+    `);
+    if (tableCheck && asInt(tableCheck.c) > 0) {
+      await this.run(`
+        CREATE TABLE IF NOT EXISTS events_static AS SELECT * FROM events;
+        DROP TABLE events;
+      `);
+    } else {
+      await this.run(`
+        CREATE TABLE IF NOT EXISTS events_static (
+          date DATE, event VARCHAR, detail VARCHAR
+        );
+      `);
+    }
+
+    let hasPrisma = false;
+    if (this.economicDb && existsSync(this.economicDb)) {
+      try {
+        await this.run(`INSTALL sqlite; LOAD sqlite;`);
+        await this.run(`ATTACH ${sqlPath(this.economicDb)} AS prisma (TYPE SQLITE, READ_ONLY);`);
+        hasPrisma = true;
+      } catch {
+        const check = await this.one(`SELECT count(*) as c FROM prisma.EconomicEvent`).catch(() => null);
+        if (check) hasPrisma = true;
+      }
+    }
+
+    if (hasPrisma) {
+      const sql = `
+        CREATE OR REPLACE VIEW events AS
+        WITH base AS (
+          SELECT 
+            CAST(timezone('America/New_York', to_timestamp(epoch(datetime) / 1000)) AS DATE) as date,
+            strftime(timezone('America/New_York', to_timestamp(epoch(datetime) / 1000)), '%H:%M') as time_et,
+            name,
+            impact
+          FROM prisma.EconomicEvent
+          WHERE country IN ('USD', 'US', '')
+        ),
+        named_events AS (
+          SELECT date, 'CPI' as event, name as detail FROM base 
+          WHERE (name LIKE '%CPI%' OR name LIKE '%Consumer Price Index%') AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'NFP' as event, name as detail FROM base 
+          WHERE (name LIKE '%Non%Farm%Payrolls%' OR name LIKE '%Nonfarm Payrolls%' OR name = 'Unemployment Rate') AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'FOMC' as event, name as detail FROM base 
+          WHERE (name LIKE '%FOMC%' OR name LIKE '%Fed Interest Rate%' OR name LIKE '%Federal Reserve%') AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'FED_MINUTES' as event, name as detail FROM base 
+          WHERE name LIKE '%FOMC Minutes%' OR name LIKE '%Fed Minutes%'
+          UNION ALL
+          SELECT date, 'ISM' as event, name as detail FROM base 
+          WHERE name LIKE '%ISM%' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'CONSUMER_CONFIDENCE' as event, name as detail FROM base 
+          WHERE name LIKE '%Consumer Confidence%' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'CONSUMER_SENTIMENT' as event, name as detail FROM base 
+          WHERE name LIKE '%Consumer Sentiment%' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'JOLTS' as event, name as detail FROM base 
+          WHERE name LIKE '%JOLTS%' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'RETAIL_SALES' as event, name as detail FROM base 
+          WHERE name LIKE '%Retail Sales%' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'PPI' as event, name as detail FROM base 
+          WHERE (name LIKE '%PPI%' OR name LIKE '%Producer Price%') AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'JOBLESS_CLAIMS' as event, name as detail FROM base 
+          WHERE (name LIKE '%Jobless Claims%' OR name LIKE '%Initial Claims%') AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'GDP' as event, name as detail FROM base 
+          WHERE name LIKE '%GDP%' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'FLASH_PMI' as event, name as detail FROM base 
+          WHERE name LIKE '%Flash%PMI%' OR name LIKE '%Manufacturing PMI%' OR name LIKE '%Services PMI%'
+          UNION ALL
+          SELECT date, 'CHICAGO_PMI' as event, name as detail FROM base 
+          WHERE name LIKE '%Chicago PMI%'
+        ),
+        time_buckets AS (
+          SELECT date, 'NEWS_0830' as event, name as detail FROM base 
+          WHERE time_et = '08:30' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'NEWS_0945' as event, name as detail FROM base 
+          WHERE time_et = '09:45' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'NEWS_1000' as event, name as detail FROM base 
+          WHERE time_et = '10:00' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'NEWS_1400' as event, name as detail FROM base 
+          WHERE time_et = '14:00' AND impact IN ('HIGH', 'MEDIUM')
+          UNION ALL
+          SELECT date, 'HIGH_IMPACT' as event, name as detail FROM base 
+          WHERE impact = 'HIGH'
+        )
+        SELECT DISTINCT date, event, detail FROM (
+          SELECT * FROM events_static
+          UNION ALL
+          SELECT * FROM named_events
+          UNION ALL
+          SELECT * FROM time_buckets
+        );
+      `;
+      await this.run(sql);
+    } else {
+      await this.run(`CREATE OR REPLACE VIEW events AS SELECT * FROM events_static;`);
+    }
+  }
+
   async replaceEvents(entries: { date: string; event: string; detail?: string }[]): Promise<void> {
-    await this.run("DELETE FROM events");
+    await this.run("DELETE FROM events_static");
     for (let i = 0; i < entries.length; i += 500) {
       const chunk = entries.slice(i, i + 500);
       if (chunk.length === 0) break;
@@ -340,7 +459,7 @@ export class Store {
             `(DATE ${sqlStr(e.date)}, ${sqlStr(e.event)}, ${e.detail ? sqlStr(e.detail) : "NULL"})`,
         )
         .join(", ");
-      await this.run(`INSERT INTO events (date, event, detail) VALUES ${values}`);
+      await this.run(`INSERT INTO events_static (date, event, detail) VALUES ${values}`);
     }
   }
 

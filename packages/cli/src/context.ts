@@ -4,6 +4,7 @@ import type { EdgeStatsConfig, Preset } from "@luxalgo/edge-stats";
 import {
   Store,
   externalBarSources,
+  resolveEconomicDb,
   loadConfig,
   loadPresets,
   presetsDir,
@@ -22,6 +23,7 @@ export async function openContext(dir?: string): Promise<CliContext> {
   const loaded = loadConfig(dir);
   const store = await Store.open(loaded.dataDir, {
     external: externalBarSources(loaded.config, loaded.rootDir),
+    economicDb: resolveEconomicDb(loaded.config, loaded.rootDir),
   });
   const presets = loadPresets(presetsDir(loaded.dataDir));
   return {

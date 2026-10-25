@@ -80,6 +80,16 @@ export const BASE_COLUMNS: ColumnSpec[] = [
   { name: "prev_nr7", type: "BOOLEAN" },
   { name: "prev_doji", type: "BOOLEAN" },
   { name: "ib_break", type: "VARCHAR" },
+  { name: "c1_dir", type: "VARCHAR" },
+  { name: "c2_dir", type: "VARCHAR" },
+  { name: "c1_c2_pattern", type: "VARCHAR" },
+  { name: "c3_open_pos", type: "VARCHAR" },
+  { name: "mfe_bps", type: "DOUBLE" },
+  { name: "mae_bps", type: "DOUBLE" },
+  { name: "pdl_swept", type: "BOOLEAN" },
+  { name: "pdh_swept", type: "BOOLEAN" },
+  { name: "swept_low_first", type: "BOOLEAN" },
+  { name: "swept_high_first", type: "BOOLEAN" },
 ];
 
 export function orColumns(window: number): ColumnSpec[] {

@@ -4,6 +4,9 @@ export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as con
 export const GAP_DIRS = ["up", "down", "none"] as const;
 export const GAP_BUCKETS = ["xs", "s", "m", "l", "xl"] as const;
 export const IB_BREAKS = ["none", "single_up", "single_down", "double"] as const;
+export const CANDLE_DIRS = ["bull", "bear"] as const;
+export const CANDLE_PATTERNS = ["BULL_BULL", "BEAR_BEAR", "BULL_BEAR", "BEAR_BULL"] as const;
+export const C3_OPEN_POSITIONS = ["gap_up", "inside", "gap_down"] as const;
 
 /*
   Gap-size buckets (percent of prior close, absolute):
@@ -11,6 +14,65 @@ export const IB_BREAKS = ["none", "single_up", "single_down", "double"] as const
 */
 
 export const fields: FieldDef[] = [
+  {
+    kind: "field",
+    name: "c1C2Pattern",
+    title: "Candle Science C1->C2 Pattern",
+    doc: "The prior 2-session candle sequence: BULL_BULL, BEAR_BEAR, BULL_BEAR, or BEAR_BULL.",
+    valueType: "enum",
+    enumValues: CANDLE_PATTERNS,
+    sql: "f.c1_c2_pattern",
+    groupable: true,
+    examples: ["closeGreen WHERE c1C2Pattern = BULL_BEAR", "touchPrevHigh GROUP BY c1C2Pattern"],
+  },
+  {
+    kind: "field",
+    name: "c1Dir",
+    title: "Candle Science C1 Direction",
+    doc: "Direction of candle 1 (two sessions ago): bull or bear.",
+    valueType: "enum",
+    enumValues: CANDLE_DIRS,
+    sql: "f.c1_dir",
+    groupable: true,
+  },
+  {
+    kind: "field",
+    name: "c2Dir",
+    title: "Candle Science C2 Direction",
+    doc: "Direction of candle 2 (prior session): bull or bear.",
+    valueType: "enum",
+    enumValues: CANDLE_DIRS,
+    sql: "f.c2_dir",
+    groupable: true,
+  },
+  {
+    kind: "field",
+    name: "c3OpenPos",
+    title: "C3 Open Location vs C2",
+    doc: "Where C3 opened relative to C2 range: 'gap_up' (> C2 High), 'inside' (C2 Low <= Open <= C2 High), or 'gap_down' (< C2 Low).",
+    valueType: "enum",
+    enumValues: C3_OPEN_POSITIONS,
+    sql: "f.c3_open_pos",
+    groupable: true,
+  },
+  {
+    kind: "field",
+    name: "mfeBps",
+    title: "Maximum Favorable Excursion (bps)",
+    doc: "Session high from open in basis points (1 bps = 0.01%).",
+    valueType: "number",
+    unit: "bps",
+    sql: "f.mfe_bps",
+  },
+  {
+    kind: "field",
+    name: "maeBps",
+    title: "Maximum Adverse Excursion (bps)",
+    doc: "Session low from open in basis points (negative value; 1 bps = 0.01%).",
+    valueType: "number",
+    unit: "bps",
+    sql: "f.mae_bps",
+  },
   {
     kind: "field",
     name: "dayOfWeek",

@@ -1,0 +1,15 @@
+{
+  "id": "candle-science",
+  "version": 1,
+  "title": "Candle Science C1->C2->C3 Radar",
+  "category": "candle-science",
+  "summary": "The green-close rate and distribution across 3-candle daily sequences (BULL_BULL, BEAR_BEAR, BULL_BEAR, BEAR_BULL). Each row shows historical probabilities, Wilson 95% confidence intervals, and excursion envelopes (MFE/MAE). Condition on economic calendar events or intraday liquidity sweeps to evaluate the forming C3 candle.",
+  "outcome": "closeGreen",
+  "groupBy": "c1C2Pattern",
+  "deltas": [
+    "3-candle sequence classification (C1->C2->C3) matching Mickey & Austin methodology",
+    "Wilson 95% confidence intervals and sample size N on every pattern",
+    "Condition directly on economic releases (NEWS_1000, NEWS_0945, CPI, FOMC) and liquidity sweeps"
+  ],
+  "library": []
+}

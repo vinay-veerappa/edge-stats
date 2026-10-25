@@ -1,0 +1,16 @@
+{
+  "id": "liquidity-sweeps",
+  "version": 1,
+  "title": "PDL / PDH Liquidity Sweeps (Turtle Soup)",
+  "category": "liquidity-sweeps",
+  "summary": "Resolution rates when price sweeps the prior session low (PDL) or high (PDH) and reclaims back inside the prior range (ICT Turtle Soup). High-probability reversal signal when aligned with morning liquidity grabs and 10:00 AM macro releases.",
+  "outcome": "closeGreen",
+  "where": "pdlSwept",
+  "groupBy": "c1C2Pattern",
+  "deltas": [
+    "Evaluates false breaks of previous day low (PDL) and high (PDH)",
+    "Identifies whether morning liquidity sweeps resolve into green closes",
+    "Cross-condition with Candle Science C1->C2 sequences and Initial Balance breaks"
+  ],
+  "library": []
+}

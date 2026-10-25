@@ -135,6 +135,18 @@ body {
   scrollbar-color: var(--border) transparent;
 }
 
+/* Ensure native selects and option dropdowns inherit dark theme properly across Windows/Chromium browsers */
+select {
+  color-scheme: dark;
+  background-color: #0a0a0a;
+  color: var(--foreground);
+}
+
+select option {
+  background-color: #0a0a0a;
+  color: var(--foreground);
+}
+
 /* Native date fields: dark, compact, calendar icon dimmed to match. */
 input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(0.6);

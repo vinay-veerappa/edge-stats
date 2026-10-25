@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { z } from "zod";
 import type { ExternalBarSource } from "./store/store";
@@ -95,6 +95,8 @@ export const configSchema = z.object({
     .default({ port: 3343, host: "127.0.0.1" }),
   /** Live Board configuration — parsed by the live module. */
   live: z.unknown().optional(),
+  /** Optional path to SQLite economic events database (e.g. web/prisma/dev.db). */
+  economicDb: z.string().optional(),
 });
 export type EdgeStatsConfig = z.infer<typeof configSchema>;
 
@@ -175,6 +177,22 @@ export function externalBarSources(config: EdgeStatsConfig, rootDir?: string): E
     });
   }
   return out;
+}
+
+export function resolveEconomicDb(config: EdgeStatsConfig, rootDir?: string): string | undefined {
+  if (config.economicDb) {
+    return rootDir ? resolve(rootDir, config.economicDb) : resolve(config.economicDb);
+  }
+  const candidates = [
+    rootDir ? resolve(rootDir, "../../web/prisma/dev.db") : null,
+    resolve(process.cwd(), "web/prisma/dev.db"),
+    resolve(process.cwd(), "../web/prisma/dev.db"),
+    resolve(process.cwd(), "../../web/prisma/dev.db"),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return undefined;
 }
 
 export function findSymbol(config: EdgeStatsConfig, symbol: string): SymbolConfig {
