@@ -15,13 +15,18 @@ import {
   QueryError,
   SESSION_BARS_MAX_CONTEXT,
   describeRegistry,
+  evaluateMarketCoaching,
   freshness,
   getSessionBars,
   getSessions,
   listAdapters,
+  listCoachModules,
   readLiveState,
   runPreset,
   runQuery,
+  setCoachModuleEnabled,
+  startSchwabHubFeed,
+  syncCoachingToJournal,
   type QueryRequest,
 } from "@luxalgo/edge-stats";
 import { z } from "zod";
@@ -135,6 +140,59 @@ export function buildApp(ctx: CliContext): Hono {
   // evaluation pass; absent or unparseable reads as { enabled: false }.
   app.get("/api/live/state", async (c) => c.json(await readLiveState(ctx.store)));
 
+  // Phase 2 Market Coaching: cross-instrument setup scanner + EdgeStats conditioning.
+  app.get("/api/coaching/live", async (c) =>
+    c.json(await evaluateMarketCoaching(ctx.store, ctx.config)),
+  );
+  app.get("/api/coaching/replay", async (c) => {
+    const tradeDate = c.req.query("date");
+    return c.json(
+      await evaluateMarketCoaching(ctx.store, ctx.config, tradeDate ? { tradeDate } : undefined),
+    );
+  });
+  app.post("/api/coaching/journal-sync", async (c) => {
+    const tradeDate = c.req.query("date");
+    const snap = await evaluateMarketCoaching(
+      ctx.store,
+      ctx.config,
+      tradeDate ? { tradeDate } : undefined,
+    );
+    return c.json(await syncCoachingToJournal(snap));
+  });
+  app.get("/api/coaching/modules", (c) => c.json({ modules: listCoachModules() }));
+  app.post("/api/coaching/modules", async (c) => {
+    const body = z.object({ id: z.string(), enabled: z.boolean() }).parse(await c.req.json());
+    return c.json({ modules: setCoachModuleEnabled(body.id, body.enabled) });
+  });
+  app.get("/api/coaching/stream", (c) => {
+    const encoder = new TextEncoder();
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stream = new ReadableStream({
+      async start(controller) {
+        const push = async () => {
+          try {
+            const snap = await evaluateMarketCoaching(ctx.store, ctx.config);
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(snap)}\n\n`));
+          } catch {
+            // keep stream alive on transient errors
+          }
+        };
+        await push();
+        timer = setInterval(() => void push(), 2000);
+      },
+      cancel() {
+        if (timer) clearInterval(timer);
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  });
+
   // Static dashboard build, when present.
   const webDist = join(packagedDataRoot(), "packages", "web", "dist");
   if (existsSync(join(webDist, "index.html"))) {
@@ -178,6 +236,7 @@ export function buildApp(ctx: CliContext): Hono {
 }
 
 export function startServer(ctx: CliContext, port: number, host: string): void {
+  startSchwabHubFeed();
   const app = buildApp(ctx);
   serve({ fetch: app.fetch, port, hostname: host }, (info) => {
     console.log(`edge-stats serving on http://${host}:${info.port}`);

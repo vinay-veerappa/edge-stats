@@ -556,6 +556,16 @@ async function deriveOne(
       pdh_swept: null,
       swept_low_first: null,
       swept_high_first: null,
+      lunch_swept_am_high: null,
+      lunch_swept_am_low: null,
+      lunch_swept_am: null,
+      pm_or_single_break: null,
+      pm_or_double_break: null,
+      org_into_30m: null,
+      org_away_30m: null,
+      news_830_high: null,
+      news_830_low: null,
+      news_wick_both_sides: null,
     };
 
     // Opening-range features
@@ -653,6 +663,26 @@ async function deriveOne(
       const up = ib.upTs !== null;
       const dn = ib.dnTs !== null;
       row.ib_break = up && dn ? "double" : up ? "single_up" : dn ? "single_down" : "none";
+    }
+
+    const o30 = cur.or.get(30);
+    if (usePrev && prevClose !== null && o30 && o30.high !== null && o30.low !== null) {
+      const ce = (cur.open + prevClose) / 2;
+      if (gapDir === "up") {
+        const entered = o30.low <= ce;
+        row.org_into_30m = entered;
+        row.org_away_30m = !entered;
+      } else if (gapDir === "down") {
+        const entered = o30.high >= ce;
+        row.org_into_30m = entered;
+        row.org_away_30m = !entered;
+      }
+    }
+    if ((sessionKey.startsWith("ny_pm_1330") || sessionKey === "ny_pm") && o30 && o30.high !== null && o30.low !== null) {
+      const up = o30.upTs !== null;
+      const dn = o30.dnTs !== null;
+      row.pm_or_single_break = (up && !dn) || (dn && !up);
+      row.pm_or_double_break = up && dn;
     }
 
     out.push(row);
@@ -764,6 +794,67 @@ async function deriveOne(
         row.gap_filled = null;
         row.gap_fill_min = null;
         row.gap_reversed = null;
+      }
+    }
+  }
+
+  if (sessionKey.startsWith("rth") || sessionKey.startsWith("ny_pm_1330") || sessionKey === "ny_pm") {
+    const isRth = sessionKey.startsWith("rth");
+    const offsetMs = isRth ? 0 : -240 * 60000;
+    const alpRows = await store.all(`
+      SELECT CAST(s.trade_date AS VARCHAR) AS trade_date,
+        max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} - 60*60000 AND b.ts < s.start_ts + ${offsetMs} - 59*60000) AS b830_high,
+        min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} - 60*60000 AND b.ts < s.start_ts + ${offsetMs} - 59*60000) AS b830_low,
+        max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} AND b.ts < s.start_ts + ${offsetMs} + 150*60000) AS am_high,
+        min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} AND b.ts < s.start_ts + ${offsetMs} + 150*60000) AS am_low,
+        max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} + 150*60000 AND b.ts < s.start_ts + ${offsetMs} + 240*60000) AS lunch_high,
+        min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} + 150*60000 AND b.ts < s.start_ts + ${offsetMs} + 240*60000) AS lunch_low,
+        max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} + 240*60000 AND b.ts < s.start_ts + ${offsetMs} + 270*60000) AS pm_or_high,
+        min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} + 240*60000 AND b.ts < s.start_ts + ${offsetMs} + 270*60000) AS pm_or_low,
+        max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} + 270*60000 AND b.ts < s.start_ts + ${offsetMs} + 390*60000) AS pm_post_high,
+        min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} + 270*60000 AND b.ts < s.start_ts + ${offsetMs} + 390*60000) AS pm_post_low,
+        max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} AND b.ts < s.start_ts + ${offsetMs} + 390*60000) AS rth_high,
+        min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} AND b.ts < s.start_ts + ${offsetMs} + 390*60000) AS rth_low
+      FROM _sess s
+      JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf}
+        AND b.ts >= s.start_ts + ${offsetMs} - 60*60000
+        AND b.ts < s.start_ts + ${offsetMs} + 390*60000
+      GROUP BY s.trade_date, s.start_ts
+    `);
+    const alpByDate = new Map(alpRows.map((r) => [asStr(r.trade_date) ?? "", r]));
+    for (const row of out) {
+      const alp = alpByDate.get(row.trade_date as string);
+      if (alp) {
+        const amHigh = asNum(alp.am_high);
+        const amLow = asNum(alp.am_low);
+        const lunchHigh = asNum(alp.lunch_high);
+        const lunchLow = asNum(alp.lunch_low);
+        if (amHigh !== null && amLow !== null && lunchHigh !== null && lunchLow !== null) {
+          row.lunch_swept_am_high = lunchHigh > amHigh;
+          row.lunch_swept_am_low = lunchLow < amLow;
+          row.lunch_swept_am = lunchHigh > amHigh || lunchLow < amLow;
+        }
+        const b830High = asNum(alp.b830_high);
+        const b830Low = asNum(alp.b830_low);
+        const rthHigh = asNum(alp.rth_high);
+        const rthLow = asNum(alp.rth_low);
+        if (b830High !== null && b830Low !== null) {
+          row.news_830_high = b830High;
+          row.news_830_low = b830Low;
+          if (rthHigh !== null && rthLow !== null) {
+            row.news_wick_both_sides = rthHigh >= b830High && rthLow <= b830Low;
+          }
+        }
+        const pmOrHigh = asNum(alp.pm_or_high);
+        const pmOrLow = asNum(alp.pm_or_low);
+        const pmPostHigh = asNum(alp.pm_post_high);
+        const pmPostLow = asNum(alp.pm_post_low);
+        if (pmOrHigh !== null && pmOrLow !== null && pmPostHigh !== null && pmPostLow !== null) {
+          const up = pmPostHigh > pmOrHigh;
+          const dn = pmPostLow < pmOrLow;
+          row.pm_or_single_break = (up && !dn) || (dn && !up);
+          row.pm_or_double_break = up && dn;
+        }
       }
     }
   }

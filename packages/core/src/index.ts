@@ -100,3 +100,49 @@ export { emitAlert, formatAlertText } from "./live/sinks";
 export type { SinkEnv } from "./live/sinks";
 export { listAlerts, replayAlert } from "./live/replay";
 export type { AlertRecord, AlertSnapshot, ListAlertsOptions } from "./live/replay";
+
+// market coaching (Phase 2 setup & cross-instrument router)
+export {
+  buildCrossInstrumentPlan,
+  evaluateInstrumentSession,
+} from "./coaching/scanner";
+export type {
+  ChopTimerState,
+  CoachingBar,
+  CrossInstrumentRoute,
+  Fvg10amState,
+  InstrumentCoachState,
+  MarketCoachingSnapshot,
+  Orb30State,
+  OrgState,
+  Q3AstraState,
+} from "./coaching/scanner";
+export { evaluateMarketCoaching, latestRthTradeDate } from "./coaching/service";
+export type { ModularCoachingSnapshot } from "./coaching/service";
+export {
+  evaluateCoachModules,
+  listCoachModules,
+  setCoachModuleEnabled,
+} from "./coaching/modules/registry";
+export type { ModuleStatus } from "./coaching/modules/registry";
+export { evaluateTradeDecision } from "./coaching/modules/decisionEngine";
+export type { DecisionVote, TradeAction, TradeDecision } from "./coaching/modules/decisionEngine";
+export { getFastTapeSnapshot, startSchwabHubFeed } from "./coaching/modules/schwabHubFeed";
+export type {
+  BasketAssetRow,
+  CoachModule,
+  CoachModuleContext,
+  FastQuote,
+  ModuleSignal,
+  OrderflowState,
+  PermissionState,
+  ReferenceLevels,
+  SignalTone,
+} from "./coaching/modules/types";
+export {
+  formatJournalSummary,
+  mergeDayNote,
+  syncCoachingToJournal,
+  tagsForInstrument,
+} from "./coaching/journalSync";
+export type { JournalSyncResult } from "./coaching/journalSync";

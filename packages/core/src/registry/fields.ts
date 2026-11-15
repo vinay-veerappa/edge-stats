@@ -16,6 +16,24 @@ export const C3_OPEN_POSITIONS = ["gap_up", "inside", "gap_down"] as const;
 export const fields: FieldDef[] = [
   {
     kind: "field",
+    name: "news830High",
+    title: "08:30 News Candle High",
+    doc: "High of the 08:30-08:31 ET news candle.",
+    valueType: "number",
+    sql: "f.news_830_high",
+    groupable: false,
+  },
+  {
+    kind: "field",
+    name: "news830Low",
+    title: "08:30 News Candle Low",
+    doc: "Low of the 08:30-08:31 ET news candle.",
+    valueType: "number",
+    sql: "f.news_830_low",
+    groupable: false,
+  },
+  {
+    kind: "field",
     name: "c1C2Pattern",
     title: "Candle Science C1->C2 Pattern",
     doc: "The prior 2-session candle sequence: BULL_BULL, BEAR_BEAR, BULL_BEAR, or BEAR_BULL.",

@@ -172,6 +172,8 @@ const CATEGORIES = new Set([
   "time-of-day",
   "volatility",
   "fvg",
+  "candle-science",
+  "liquidity-sweeps",
 ]);
 
 /** The only LuxAlgo Library pages presets may cite — verified to exist. */

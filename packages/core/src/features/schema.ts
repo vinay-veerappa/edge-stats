@@ -90,6 +90,19 @@ export const BASE_COLUMNS: ColumnSpec[] = [
   { name: "pdh_swept", type: "BOOLEAN" },
   { name: "swept_low_first", type: "BOOLEAN" },
   { name: "swept_high_first", type: "BOOLEAN" },
+  // PM & Lunch sweep features
+  { name: "lunch_swept_am_high", type: "BOOLEAN" },
+  { name: "lunch_swept_am_low", type: "BOOLEAN" },
+  { name: "lunch_swept_am", type: "BOOLEAN" },
+  { name: "pm_or_single_break", type: "BOOLEAN" },
+  { name: "pm_or_double_break", type: "BOOLEAN" },
+  // ORG 30m features
+  { name: "org_into_30m", type: "BOOLEAN" },
+  { name: "org_away_30m", type: "BOOLEAN" },
+  // 08:30 News candle sweep features
+  { name: "news_830_high", type: "DOUBLE" },
+  { name: "news_830_low", type: "DOUBLE" },
+  { name: "news_wick_both_sides", type: "BOOLEAN" },
 ];
 
 /** Default mid band, as fractions of the range. One place to change it. */
