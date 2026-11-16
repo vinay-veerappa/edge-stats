@@ -457,7 +457,63 @@ export function evaluateInstrumentSession(
   const etBars = toEtBars(bars);
   const rthBars = etBars.filter((b) => b.hhmm >= 9 * 60 + 30);
   if (rthBars.length === 0) {
-    throw new Error(`No RTH bars for ${symbol} on ${tradeDate}`);
+    if (bars.length === 0) {
+      throw new Error(`No bars for ${symbol} on ${tradeDate}`);
+    }
+    const sorted = [...bars].sort((a, b) => a.tsMs - b.tsMs);
+    const lastRaw = sorted[sorted.length - 1]!;
+    const lastDt = DateTime.fromMillis(lastRaw.tsMs, { zone: "America/New_York" });
+    const globexOpen = sorted[0]!.open;
+    const gapBps =
+      priorClose && priorClose > 0
+        ? Number((((lastRaw.close - priorClose) / priorClose) * 10000).toFixed(1))
+        : null;
+    const gapDir =
+      gapBps === null ? "UNKNOWN" : gapBps > 2 ? "UP" : gapBps < -2 ? "DOWN" : "FLAT";
+    return {
+      symbol,
+      tradeDate,
+      asOfEt: lastDt.toFormat("HH:mm"),
+      lastPrice: lastRaw.close,
+      org: {
+        priorClose,
+        rthOpen: globexOpen,
+        gapBps,
+        gapDir,
+        orgInto30m: false,
+        orgAway30m: false,
+        gapFilled: false,
+      },
+      orb30: {
+        ready: false,
+        high: null,
+        low: null,
+        mid: null,
+        rangeBps: null,
+        ext25Up: null,
+        ext25Down: null,
+        orb25ExtReject: "NONE",
+        extremeLockedEarly: false,
+      },
+      fvg10am: {
+        status: "NONE",
+        direction: null,
+        fvgHigh: null,
+        fvgLow: null,
+        formedAtEt: null,
+        maeBps: null,
+        stopFit10bps: null,
+      },
+      q3Astra: {
+        activeQuarter: "OUTSIDE",
+        cycleLabel: "GLOBEX",
+        lunchGated: false,
+        nearestDttAnchor: null,
+        ifvgConfirmed: null,
+      },
+      noonGate: "NEUTRAL",
+      chopTimer: { active: false, amRangeBps: 0, minsSinceAmExtreme: null, phase: "NONE" },
+    };
   }
   const last = rthBars[rthBars.length - 1]!;
   const org = computeOrg(rthBars, priorClose);

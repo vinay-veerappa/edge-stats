@@ -75,6 +75,70 @@ async function readLiveRthBars(
   }));
 }
 
+async function readLiveGlobexBars(
+  store: Store,
+  config: EdgeStatsConfig,
+  symbol: string,
+  tradeDate: string,
+): Promise<CoachingBar[]> {
+  const path = resolveLiveParquetPath(config, symbol);
+  if (!path) return [];
+  const dt = DateTime.fromISO(tradeDate, { zone: "America/New_York" });
+  if (!dt.isValid) return [];
+  // Globex window: either today's 18:00+ ET (Sunday/evening) or yesterday 18:00 -> today 09:30 ET
+  const eveStart = dt.set({ hour: 18, minute: 0, second: 0, millisecond: 0 });
+  const prevEveStart = eveStart.minus({ days: 1 });
+  const rthStart = dt.set({ hour: 9, minute: 30, second: 0, millisecond: 0 });
+
+  const eveRows = await store.all(
+    `SELECT time, open, high, low, close, volume
+     FROM read_parquet(${sqlPath(path)})
+     WHERE time >= ${eveStart.toMillis()}
+     ORDER BY time ASC`,
+  );
+  const rows =
+    eveRows.length > 0
+      ? eveRows
+      : await store.all(
+          `SELECT time, open, high, low, close, volume
+           FROM read_parquet(${sqlPath(path)})
+           WHERE time >= ${prevEveStart.toMillis()} AND time < ${rthStart.toMillis()}
+           ORDER BY time ASC`,
+        );
+
+  return rows.map((r) => ({
+    tsMs: asNum(r.time) ?? 0,
+    open: asNum(r.open) ?? 0,
+    high: asNum(r.high) ?? 0,
+    low: asNum(r.low) ?? 0,
+    close: asNum(r.close) ?? 0,
+    volume: asNum(r.volume) ?? 0,
+  }));
+}
+
+async function getLatestFoldedLevels(
+  store: Store,
+  config: EdgeStatsConfig,
+  symbol: string,
+): Promise<{ prevClose: number | null; prevHigh: number | null; prevLow: number | null }> {
+  try {
+    const f = await freshness(store, config);
+    const symFresh = f.symbols.find((s) => s.symbol === symbol);
+    const lastMs = symFresh?.lastBarMs;
+    if (!lastMs) return { prevClose: null, prevHigh: null, prevLow: null };
+    const lastDate = DateTime.fromMillis(lastMs, { zone: "America/New_York" }).toISODate();
+    if (!lastDate) return { prevClose: null, prevHigh: null, prevLow: null };
+    const sb = await getSessionBars(store, config, `${symbol}|rth|${lastDate}`);
+    return {
+      prevClose: sb.levels.close ?? sb.levels.prevClose,
+      prevHigh: sb.levels.high ?? sb.levels.prevHigh,
+      prevLow: sb.levels.low ?? sb.levels.prevLow,
+    };
+  } catch {
+    return { prevClose: null, prevHigh: null, prevLow: null };
+  }
+}
+
 function mergeBars(folded: CoachingBar[], live: CoachingBar[]): CoachingBar[] {
   if (live.length === 0) return folded;
   const byTs = new Map<number, CoachingBar>();
@@ -164,7 +228,16 @@ export async function evaluateMarketCoaching(
         // session not yet folded into DuckDB; fall back to live_storage
       }
       const live = await readLiveRthBars(store, config, symbol, tradeDate);
-      const bars = mergeBars(folded, live);
+      let bars = mergeBars(folded, live);
+      if (bars.length === 0) {
+        bars = await readLiveGlobexBars(store, config, symbol, tradeDate);
+        if (bars.length > 0 && prevHigh === null && prevLow === null) {
+          const prior = await getLatestFoldedLevels(store, config, symbol);
+          prevClose = prevClose ?? prior.prevClose;
+          prevHigh = prior.prevHigh;
+          prevLow = prior.prevLow;
+        }
+      }
       if (bars.length === 0) continue;
       const state = evaluateInstrumentSession(symbol, tradeDate, bars, prevClose);
       let sessionHigh = -Infinity;
