@@ -167,21 +167,43 @@ export function buildApp(ctx: CliContext): Hono {
   app.get("/api/coaching/stream", (c) => {
     const encoder = new TextEncoder();
     let timer: ReturnType<typeof setInterval> | undefined;
+    let closed = false;
+    let inFlight = false;
+    const stop = () => {
+      closed = true;
+      if (timer) clearInterval(timer);
+      timer = undefined;
+    };
+    // Client went away: stop ticking. Without this the interval kept
+    // evaluating every 2 s forever per dropped client (node CPU leak).
+    c.req.raw.signal?.addEventListener("abort", stop, { once: true });
     const stream = new ReadableStream({
       async start(controller) {
         const push = async () => {
+          if (closed || inFlight) return;
+          inFlight = true;
+          let snap: unknown;
           try {
-            const snap = await evaluateMarketCoaching(ctx.store, ctx.config);
+            snap = await evaluateMarketCoaching(ctx.store, ctx.config);
+          } catch {
+            // keep stream alive on transient evaluation errors
+            inFlight = false;
+            return;
+          }
+          inFlight = false;
+          if (closed) return;
+          try {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(snap)}\n\n`));
           } catch {
-            // keep stream alive on transient errors
+            // stream closed or errored: the client is gone
+            stop();
           }
         };
         await push();
-        timer = setInterval(() => void push(), 2000);
+        if (!closed) timer = setInterval(() => void push(), 2000);
       },
       cancel() {
-        if (timer) clearInterval(timer);
+        stop();
       },
     });
     return new Response(stream, {
