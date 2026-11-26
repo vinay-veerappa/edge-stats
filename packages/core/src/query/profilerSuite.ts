@@ -3,11 +3,13 @@
   Every cell passes through the EdgeStats honesty layer (Wilson 95% CI,
   min-N guards, half/half stability split, and DISCLAIMER).
 */
-import type { EdgeStatsConfig } from "../config";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import type { EdgeStatsConfig, SymbolConfig } from "../config";
 import { defaultSessionKey, findSymbol } from "../config";
 import { ensureDailyTables } from "../features/dailySchema";
 import { currentGlobexTradeDateIso } from "../features/deriveDaily";
-import { LEVEL_KEYS } from "../features/spineAdapter";
+import { LEVEL_KEYS, runDailyProfilerBatch } from "../features/spineAdapter";
 import {
   applyGuards,
   distributionFromQuantiles,
@@ -18,7 +20,7 @@ import {
   type StabilitySplit,
 } from "../stats/stats";
 import type { Store } from "../store/store";
-import { sqlDate, sqlStr } from "../util/sql";
+import { sqlDate, sqlPath, sqlStr } from "../util/sql";
 import { asInt, asNum, asStr, round } from "../util/values";
 import { compileConditionExpr } from "./compile";
 import { compileCtxFor, DISCLAIMER } from "./execute";
@@ -94,6 +96,44 @@ export interface ProfilerSessionShare {
   lodCi95: [number, number] | null;
 }
 
+export interface ProfilerRangeBin {
+  binBps: number;
+  label: string;
+  count: number;
+  rate: number;
+}
+
+export interface ProfilerSessionTimeBucket {
+  bucketMin: number;
+  etLabel: string;
+  falseCount: number;
+  brokenCount: number;
+  falseRate: number;
+  brokenRate: number;
+}
+
+export interface ProfilerLiveContext {
+  tradeDate: string;
+  currentSession: "asia" | "london" | "ny1" | "ny2" | "post_ny2";
+  source: "live_storage" | "daily_context";
+  asiaStatus: string | null;
+  asiaBroken: boolean | null;
+  londonStatus: string | null;
+  londonBroken: boolean | null;
+  ny1Status: string | null;
+  ny1Broken: boolean | null;
+  ny2Status: string | null;
+  ny2Broken: boolean | null;
+  prevNy1Status: string | null;
+  prevNy1Broken: boolean | null;
+  prevNy2Status: string | null;
+  prevNy2Broken: boolean | null;
+  p12Scenario: string | null;
+  alnPattern: string | null;
+  brokenBroken: boolean | null;
+  complete: boolean;
+}
+
 export interface ProfilerSuiteResult {
   symbol: string;
   targetSession: ProfilerTargetSession;
@@ -103,7 +143,12 @@ export interface ProfilerSuiteResult {
   dailyHighDist: DistributionSummary | null;
   dailyLowDist: DistributionSummary | null;
   dailyRangeDist: DistributionSummary | null;
+  highRangeBins: ProfilerRangeBin[];
+  lowRangeBins: ProfilerRangeBin[];
   timeBuckets: ProfilerTimeBucket[];
+  sessionTimeBuckets: ProfilerSessionTimeBucket[];
+  medianFalseMin: number | null;
+  medianBrokenMin: number | null;
   sessionShares: ProfilerSessionShare[];
   levelTouches: ProfilerLevelTouchRow[];
   matchedDates: string[];
@@ -319,6 +364,89 @@ export async function runProfilerSuite(
     };
   });
 
+  // 3b. Session False-Move & Break Timing Histograms for the selected target session
+  const sessTimeRows = await store.all(`
+    ${baseCte}
+    SELECT
+      b AS bucket_min,
+      count(*) FILTER (WHERE ${targetColPrefix}_false_break = TRUE AND floor(${targetColPrefix}_status_at_min / ${bucketMin}) * ${bucketMin} = b)::INT AS fc,
+      count(*) FILTER (WHERE ${targetColPrefix}_broken = TRUE AND floor(${targetColPrefix}_broken_at_min / ${bucketMin}) * ${bucketMin} = b)::INT AS bc
+    FROM (SELECT unnest(range(0, 1380, ${bucketMin})) AS b) grid
+    LEFT JOIN matched ON TRUE
+    GROUP BY b
+    ORDER BY b
+  `);
+  const sessTimeSummary = await store.one(`
+    ${baseCte}
+    SELECT
+      count(*) FILTER (WHERE ${targetColPrefix}_false_break = TRUE AND ${targetColPrefix}_status_at_min IS NOT NULL)::INT AS fn,
+      median(${targetColPrefix}_status_at_min) FILTER (WHERE ${targetColPrefix}_false_break = TRUE) AS fmed,
+      count(*) FILTER (WHERE ${targetColPrefix}_broken = TRUE AND ${targetColPrefix}_broken_at_min IS NOT NULL)::INT AS bn,
+      median(${targetColPrefix}_broken_at_min) FILTER (WHERE ${targetColPrefix}_broken = TRUE) AS bmed
+    FROM matched
+  `);
+  const fTotal = Math.max(1, asInt(sessTimeSummary?.fn) ?? 0);
+  const bTotal = Math.max(1, asInt(sessTimeSummary?.bn) ?? 0);
+  const sessionTimeBuckets: ProfilerSessionTimeBucket[] = sessTimeRows
+    .map((r) => {
+      const bm = asInt(r.bucket_min) ?? 0;
+      const fc = asInt(r.fc) ?? 0;
+      const bc = asInt(r.bc) ?? 0;
+      return {
+        bucketMin: bm,
+        etLabel: offsetMinToEtLabel(bm),
+        falseCount: fc,
+        brokenCount: bc,
+        falseRate: round(fc / fTotal),
+        brokenRate: round(bc / bTotal),
+      };
+    })
+    .filter((b) => b.falseCount > 0 || b.brokenCount > 0);
+  const medianFalseMin = asNum(sessTimeSummary?.fmed) !== null ? Math.round(asNum(sessTimeSummary?.fmed)!) : null;
+  const medianBrokenMin = asNum(sessTimeSummary?.bmed) !== null ? Math.round(asNum(sessTimeSummary?.bmed)!) : null;
+
+  // 3c. Global / Daily High & Low Range Distribution Histograms (0.1% = 10 bps bins, clamped to [-5%, +5%])
+  const highBinRows = await store.all(`
+    ${baseCte}
+    SELECT
+      CAST(least(500, greatest(0, floor(daily_high_bps / 10.0) * 10)) AS INT) AS bin_bps,
+      count(*)::INT AS cnt
+    FROM matched
+    WHERE daily_high_bps IS NOT NULL
+    GROUP BY 1
+    ORDER BY 1
+  `);
+  const lowBinRows = await store.all(`
+    ${baseCte}
+    SELECT
+      CAST(greatest(-500, least(0, floor(daily_low_bps / 10.0) * 10)) AS INT) AS bin_bps,
+      count(*)::INT AS cnt
+    FROM matched
+    WHERE daily_low_bps IS NOT NULL
+    GROUP BY 1
+    ORDER BY 1
+  `);
+  const highRangeBins: ProfilerRangeBin[] = highBinRows.map((r) => {
+    const bp = asInt(r.bin_bps) ?? 0;
+    const cnt = asInt(r.cnt) ?? 0;
+    return {
+      binBps: bp,
+      label: bp >= 500 ? ">5.0%" : `+${(bp / 100).toFixed(1)}%`,
+      count: cnt,
+      rate: totalN > 0 ? round(cnt / totalN) : 0,
+    };
+  });
+  const lowRangeBins: ProfilerRangeBin[] = lowBinRows.map((r) => {
+    const bp = asInt(r.bin_bps) ?? 0;
+    const cnt = asInt(r.cnt) ?? 0;
+    return {
+      binBps: bp,
+      label: bp <= -500 ? "<-5.0%" : `${(bp / 100).toFixed(1)}%`,
+      count: cnt,
+      rate: totalN > 0 ? round(cnt / totalN) : 0,
+    };
+  });
+
   // 4. HOD/LOD Session Shares
   const sessList = ["asia", "london", "ny1", "ny2", "post_ny2"];
   const shareRows = await store.all(`
@@ -389,7 +517,12 @@ export async function runProfilerSuite(
     dailyHighDist: parseDist(summaryRow, "hi", "bps"),
     dailyLowDist: parseDist(summaryRow, "lo", "bps"),
     dailyRangeDist: parseDist(summaryRow, "rng", "bps"),
+    highRangeBins,
+    lowRangeBins,
     timeBuckets,
+    sessionTimeBuckets,
+    medianFalseMin,
+    medianBrokenMin,
     sessionShares,
     levelTouches,
     matchedDates: dateRows.map((r) => asStr(r.td) ?? "").filter(Boolean),
@@ -472,5 +605,141 @@ export async function runProfilerPriceModel(
     guards,
     points,
     disclaimer: DISCLAIMER,
+  };
+}
+
+function currentEtSession(nowMs = Date.now()): "asia" | "london" | "ny1" | "ny2" | "post_ny2" {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date(nowMs)).map((p) => [p.type, p.value]));
+  const mins = Number(parts.hour) * 60 + Number(parts.minute);
+  if (mins >= 18 * 60 || mins < 2 * 60 + 30) return "asia";
+  if (mins < 7 * 60 + 30) return "london";
+  if (mins < 11 * 60 + 30) return "ny1";
+  if (mins < 16 * 60) return "ny2";
+  return "post_ny2";
+}
+
+function resolveLiveStoragePath(symCfg: SymbolConfig, store: Store): string | null {
+  const name = symCfg.external?.name ?? symCfg.symbol.replace(/\d+$/, "");
+  const repoRoot = resolve(dirname(store.dataDir), "..", "..");
+  const p = resolve(repoRoot, "data", "live", `live_storage_-${name}.parquet`);
+  return existsSync(p) ? p : null;
+}
+
+/**
+ * Compute today's LIVE Daily Profiler context directly from `data/live/live_storage_-<NAME>.parquet`
+ * via `crates/spine_wasm::daily_profiler_batch` (ADR-039 single causal engine),
+ * falling back to the latest `daily_context` row if live storage is unavailable.
+ */
+export async function detectLiveProfilerContext(
+  store: Store,
+  config: EdgeStatsConfig,
+  symbol: string,
+): Promise<ProfilerLiveContext | null> {
+  await ensureDailyTables(store);
+  const symCfg = findSymbol(config, symbol);
+  const activeSess = currentEtSession();
+  const livePath = resolveLiveStoragePath(symCfg, store);
+
+  if (livePath) {
+    try {
+      // Load the last ~5 calendar days of 1m bars so prev_ny1/prev_ny2 + today's Asia/London/NY1/NY2 are causally populated
+      const rows = await store.all(`
+        SELECT time, open, high, low, close, coalesce(volume, 0) AS volume
+        FROM read_parquet(${sqlPath(livePath)})
+        WHERE time >= (SELECT max(time) - 5 * 86400000 FROM read_parquet(${sqlPath(livePath)}))
+        ORDER BY time
+      `);
+      const n = rows.length;
+      if (n >= 10) {
+        const tsOpenS = new Float64Array(n);
+        const open = new Float64Array(n);
+        const high = new Float64Array(n);
+        const low = new Float64Array(n);
+        const close = new Float64Array(n);
+        const volume = new Float64Array(n);
+        const isRoll = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+          const r = rows[i]!;
+          tsOpenS[i] = Math.floor((asNum(r.time) ?? 0) / 1000);
+          open[i] = asNum(r.open) ?? 0;
+          high[i] = asNum(r.high) ?? 0;
+          low[i] = asNum(r.low) ?? 0;
+          close[i] = asNum(r.close) ?? 0;
+          volume[i] = asNum(r.volume) ?? 0;
+        }
+        const batch = runDailyProfilerBatch(tsOpenS, open, high, low, close, volume, isRoll);
+        const latest = batch.days[batch.days.length - 1];
+        if (latest) {
+          return {
+            tradeDate: latest.trade_date,
+            currentSession: activeSess,
+            source: "live_storage",
+            asiaStatus: latest.asia.status,
+            asiaBroken: latest.asia.broken,
+            londonStatus: latest.london.status,
+            londonBroken: latest.london.broken,
+            ny1Status: latest.ny1.status,
+            ny1Broken: latest.ny1.broken,
+            ny2Status: latest.ny2.status,
+            ny2Broken: latest.ny2.broken,
+            prevNy1Status: latest.prev_ny1_status,
+            prevNy1Broken: latest.prev_ny1_broken,
+            prevNy2Status: latest.prev_ny2_status,
+            prevNy2Broken: latest.prev_ny2_broken,
+            p12Scenario: latest.p12_scenario,
+            alnPattern: latest.aln_pattern,
+            brokenBroken: latest.broken_broken,
+            complete: latest.complete,
+          };
+        }
+      }
+    } catch {
+      // fall through to daily_context
+    }
+  }
+
+  const row = await store.one(`
+    SELECT CAST(trade_date AS VARCHAR) AS tradeDate,
+           asia_status AS asiaStatus, asia_broken AS asiaBroken,
+           london_status AS londonStatus, london_broken AS londonBroken,
+           ny1_status AS ny1Status, ny1_broken AS ny1Broken,
+           ny2_status AS ny2Status, ny2_broken AS ny2Broken,
+           prev_ny1_status AS prevNy1Status, prev_ny1_broken AS prevNy1Broken,
+           prev_ny2_status AS prevNy2Status, prev_ny2_broken AS prevNy2Broken,
+           p12_scenario AS p12Scenario, aln_pattern AS alnPattern, broken_broken AS brokenBroken,
+           complete
+    FROM daily_context
+    WHERE symbol = ${sqlStr(symCfg.symbol)}
+    ORDER BY trade_date DESC
+    LIMIT 1
+  `);
+  if (!row) return null;
+  const asBool = (v: unknown) => (typeof v === "boolean" ? v : null);
+  return {
+    tradeDate: asStr(row.tradeDate) ?? "",
+    currentSession: activeSess,
+    source: "daily_context",
+    asiaStatus: asStr(row.asiaStatus),
+    asiaBroken: asBool(row.asiaBroken),
+    londonStatus: asStr(row.londonStatus),
+    londonBroken: asBool(row.londonBroken),
+    ny1Status: asStr(row.ny1Status),
+    ny1Broken: asBool(row.ny1Broken),
+    ny2Status: asStr(row.ny2Status),
+    ny2Broken: asBool(row.ny2Broken),
+    prevNy1Status: asStr(row.prevNy1Status),
+    prevNy1Broken: asBool(row.prevNy1Broken),
+    prevNy2Status: asStr(row.prevNy2Status),
+    prevNy2Broken: asBool(row.prevNy2Broken),
+    p12Scenario: asStr(row.p12Scenario),
+    alnPattern: asStr(row.alnPattern),
+    brokenBroken: asBool(row.brokenBroken),
+    complete: Boolean(row.complete),
   };
 }

@@ -184,9 +184,12 @@ export async function runCandleScienceSuite(
     "cs.complete = TRUE",
     "cs.roll_safe = TRUE",
   ];
-  // Never include the current forming Globex trading day in 1d historical stats
+  // Never include the current forming bar in historical stats (1d Globex day OR 4h/1h/15m intraday bar)
   if (tf === "1d") {
     conds.push(`cs.trade_date < DATE ${sqlStr(currentGlobexTradeDateIso())}`);
+  } else {
+    const tfMs = tf === "4h" ? 4 * 3600_000 : tf === "1h" ? 3600_000 : 15 * 60_000;
+    conds.push(`cs.bar_ts + ${tfMs} <= ${Date.now()}`);
   }
   if (activeMask !== 0) {
     conds.push(`(cs.sig_mask & ${activeMask}) = ${expectedMask}`);
@@ -491,20 +494,26 @@ async function detectLiveCandleContext(
           };
         }
       } else {
+        // Align live intraday buckets to America/New_York CME Globex wall-clock time (4h = 18:00/22:00/02:00/06:00/10:00/14:00 ET)
+        const bucketExpr =
+          tf === "4h"
+            ? "(date_trunc('day', (to_timestamp(time / 1000) AT TIME ZONE 'America/New_York') + INTERVAL 6 HOURS) + INTERVAL (CAST(floor(hour((to_timestamp(time / 1000) AT TIME ZONE 'America/New_York') + INTERVAL 6 HOURS) / 4) * 4 AS BIGINT)) HOURS - INTERVAL 6 HOURS)"
+            : tf === "1h"
+              ? "date_trunc('hour', to_timestamp(time / 1000) AT TIME ZONE 'America/New_York')"
+              : "time_bucket(INTERVAL '15 minutes', to_timestamp(time / 1000) AT TIME ZONE 'America/New_York')";
         const rows = await store.all(`
           WITH b AS (
-            SELECT *,
-              time_bucket(INTERVAL '${tf === "4h" ? "4 hours" : tf === "1h" ? "1 hour" : "15 minutes"}', to_timestamp(time / 1000)) AS bucket
+            SELECT *, ${bucketExpr} AS bucket_ny
             FROM read_parquet(${sqlPath(livePath)})
           )
-          SELECT CAST(strftime(bucket AT TIME ZONE 'America/New_York', '%Y-%m-%d %H:%M') AS VARCHAR) AS label,
+          SELECT CAST(strftime(bucket_ny, '%Y-%m-%d %H:%M ET') AS VARCHAR) AS label,
                  arg_min(open, time) AS o,
                  max(high) AS h,
                  min(low) AS l,
                  arg_max(close, time) AS c
           FROM b
-          GROUP BY bucket
-          ORDER BY bucket DESC
+          GROUP BY bucket_ny
+          ORDER BY bucket_ny DESC
           LIMIT 3
         `);
         if (rows.length === 3) {

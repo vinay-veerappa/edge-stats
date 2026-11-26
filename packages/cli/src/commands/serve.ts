@@ -17,6 +17,7 @@ import {
   createEdgeSnapshot,
   describeRegistry,
   deriveDailyForSymbol,
+  detectLiveProfilerContext,
   ensureDailyTables,
   evaluateMarketCoaching,
   freshness,
@@ -276,21 +277,7 @@ export function buildApp(ctx: CliContext): Hono {
     await ensureDailyTables(ctx.store);
     const sym = c.req.query("symbol") ?? ctx.config.symbols[0]?.symbol ?? "NQ1";
     const safeSym = sym.replaceAll("'", "''");
-    const latestDay = await ctx.store.one(`
-      SELECT CAST(trade_date AS VARCHAR) AS tradeDate,
-             asia_status AS asiaStatus, asia_broken AS asiaBroken,
-             london_status AS londonStatus, london_broken AS londonBroken,
-             ny1_status AS ny1Status, ny1_broken AS ny1Broken,
-             ny2_status AS ny2Status, ny2_broken AS ny2Broken,
-             prev_ny1_status AS prevNy1Status, prev_ny1_broken AS prevNy1Broken,
-             prev_ny2_status AS prevNy2Status, prev_ny2_broken AS prevNy2Broken,
-             p12_scenario AS p12Scenario, aln_pattern AS alnPattern, broken_broken AS brokenBroken,
-             complete
-      FROM daily_context
-      WHERE symbol = '${safeSym}'
-      ORDER BY trade_date DESC
-      LIMIT 1
-    `);
+    const latestDay = await detectLiveProfilerContext(ctx.store, ctx.config, sym);
     const latestCs = await ctx.store.one(`
       SELECT CAST(trade_date AS VARCHAR) AS tradeDate,
              c1_o, c1_h, c1_l, c1_c, c2_o, c2_h, c2_l, c2_c, c3_o,
@@ -300,7 +287,7 @@ export function buildApp(ctx: CliContext): Hono {
       ORDER BY bar_ts DESC
       LIMIT 1
     `);
-    return c.json({ symbol: sym, daily: latestDay ?? null, candleScience: latestCs ?? null });
+    return c.json({ symbol: sym, daily: latestDay, candleScience: latestCs ?? null });
   });
 
   // Phase 2 Market Coaching: cross-instrument setup scanner + EdgeStats conditioning.

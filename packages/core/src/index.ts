@@ -58,6 +58,7 @@ export type { ExportFormat, ExportSummary } from "./query/export";
 export {
   runProfilerSuite,
   runProfilerPriceModel,
+  detectLiveProfilerContext,
   offsetMinToEtLabel,
 } from "./query/profilerSuite";
 export type {
@@ -68,6 +69,9 @@ export type {
   ProfilerOutcomeRow,
   ProfilerLevelTouchRow,
   ProfilerTimeBucket,
+  ProfilerRangeBin,
+  ProfilerSessionTimeBucket,
+  ProfilerLiveContext,
   ProfilerSessionShare,
   PriceModelPoint,
   ProfilerPriceModelResult,

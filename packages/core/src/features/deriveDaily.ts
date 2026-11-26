@@ -515,26 +515,51 @@ export async function deriveDailyForSymbol(
     }
 
     // 2b. MTF Candle Science (`4h`, `1h`, `15m`) when 1m source bars are available
+    // All buckets are aligned to America/New_York CME Globex wall-clock time (18:00 ET day open):
+    //   4h  -> 18:00, 22:00, 02:00, 06:00, 10:00, 14:00 ET (DST-aware!)
+    //   1h  -> top of every ET hour
+    //   15m -> :00, :15, :30, :45 ET
     if (tfMin === 1) {
       const nowMs = Date.now();
-      const mtfSpecs: { tf: string; interval: string; intervalMs: number }[] = [
-        { tf: "4h", interval: "4 hours", intervalMs: 4 * 3600_000 },
-        { tf: "1h", interval: "1 hour", intervalMs: 3600_000 },
-        { tf: "15m", interval: "15 minutes", intervalMs: 15 * 60_000 },
+      const mtfSpecs: { tf: string; intervalMs: number; bucketSql: string }[] = [
+        {
+          tf: "4h",
+          intervalMs: 4 * 3600_000,
+          bucketSql:
+            "(date_trunc('day', (to_timestamp(ts / 1000) AT TIME ZONE 'America/New_York') + INTERVAL 6 HOURS) + INTERVAL (CAST(floor(hour((to_timestamp(ts / 1000) AT TIME ZONE 'America/New_York') + INTERVAL 6 HOURS) / 4) * 4 AS BIGINT)) HOURS - INTERVAL 6 HOURS)",
+        },
+        {
+          tf: "1h",
+          intervalMs: 3600_000,
+          bucketSql: "date_trunc('hour', to_timestamp(ts / 1000) AT TIME ZONE 'America/New_York')",
+        },
+        {
+          tf: "15m",
+          intervalMs: 15 * 60_000,
+          bucketSql:
+            "time_bucket(INTERVAL '15 minutes', to_timestamp(ts / 1000) AT TIME ZONE 'America/New_York')",
+        },
       ];
       for (const spec of mtfSpecs) {
         const agg = await store.all(`
-          SELECT CAST(epoch(time_bucket(INTERVAL '${spec.interval}', to_timestamp(ts / 1000))) AS BIGINT) AS ts_s,
-                 CAST(strftime(time_bucket(INTERVAL '${spec.interval}', to_timestamp(ts / 1000)) + INTERVAL 6 HOURS, '%Y-%m-%d') AS VARCHAR) AS td,
-                 max(ts) AS last_ts_ms,
-                 arg_min(open, ts) AS open,
-                 max(high) AS high,
-                 min(low) AS low,
-                 arg_max(close, ts) AS close,
-                 count(DISTINCT contract) > 1 AS multi_c
-          FROM _sym_bars
-          GROUP BY 1, 2
-          ORDER BY 1
+          WITH bucketed AS (
+            SELECT
+              ${spec.bucketSql} AS b_ny,
+              ts, open, high, low, close, contract
+            FROM _sym_bars
+          )
+          SELECT
+            CAST(epoch(timezone('America/New_York', b_ny)) AS BIGINT) AS ts_s,
+            CAST(strftime(b_ny + INTERVAL 6 HOURS, '%Y-%m-%d') AS VARCHAR) AS td,
+            max(ts) AS last_ts_ms,
+            arg_min(open, ts) AS open,
+            max(high) AS high,
+            min(low) AS low,
+            arg_max(close, ts) AS close,
+            count(DISTINCT contract) > 1 AS multi_c
+          FROM bucketed
+          GROUP BY b_ny
+          ORDER BY ts_s
         `);
         if (agg.length < 3) continue;
         const m = agg.length;

@@ -14,6 +14,7 @@ import type {
   Preset,
   PresetRunRequest,
   PresetRunResult,
+  ProfilerLiveContext,
   ProfilerPriceModelResult,
   ProfilerSuiteRequest,
   ProfilerSuiteResult,
@@ -163,7 +164,7 @@ export const api = {
   liveContext: (symbol: string, signal?: AbortSignal) =>
     get<{
       symbol: string;
-      daily: Record<string, unknown> | null;
+      daily: ProfilerLiveContext | null;
       candleScience: Record<string, unknown> | null;
     }>(`/api/live/context?symbol=${encodeURIComponent(symbol)}`, signal),
   createSnapshot: (body: CreateSnapshotRequest, signal?: AbortSignal) =>
