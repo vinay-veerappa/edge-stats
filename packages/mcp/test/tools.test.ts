@@ -218,14 +218,16 @@ interface ErrorPayload {
 }
 
 describe("the edge_* tool surface over a real MCP client", () => {
-  it("serves exactly the ten edge_* tools", async () => {
+  it("serves the twelve edge_* tools", async () => {
     const listed = await client.listTools();
-    expect(listed.tools).toHaveLength(10);
+    expect(listed.tools).toHaveLength(12);
     expect(listed.tools.map((t) => t.name).sort()).toEqual([
+      "edge_candle_science",
       "edge_export",
       "edge_fields",
       "edge_freshness",
       "edge_live",
+      "edge_profiler",
       "edge_query",
       "edge_report",
       "edge_reports_list",

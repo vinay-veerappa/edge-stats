@@ -30,9 +30,13 @@ import {
   getSessions,
   libraryUrl,
   loadEventFiles,
+  runCandleScienceSuite,
   runPreset,
+  runProfilerSuite,
   runQuery,
   tradeTagsIn,
+  type CsDimName,
+  type ProfilerSuiteRequest,
 } from "@luxalgo/edge-stats";
 import { getContext } from "../context";
 
@@ -562,6 +566,85 @@ export function registerEdgeTools(server: McpServer): void {
           updatedAt: typeof updatedAt === "string" ? updatedAt : null,
           setups: Array.isArray(setups) ? setups : [],
         });
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "edge_profiler",
+    {
+      title: "Daily Profiler sequential session matrix",
+      description:
+        "Evaluates the causal Daily Profiler (Asia -> London -> NY1 -> NY2, Spine SessionBoxAnalytic + ALN) for a symbol, returning LT/LF/ST/SF/None distributions with Wilson 95% CIs, broken rates, HOD/LOD timing & session shares, daily range quantiles (P10..P95 bps), and all 20 reference level touch rates. Never predict EOD day types pre-market; quote N and Wilson CIs with every rate.",
+      inputSchema: {
+        symbol: z.string().describe("Configured symbol (e.g. NQ1, ES1)"),
+        targetSession: z
+          .enum(["asia", "london", "ny1", "ny2", "daily"])
+          .default("ny1")
+          .describe("Target session whose LT/LF/ST/SF distribution is evaluated"),
+        filters: z
+          .object({
+            asia: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            london: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            ny1: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            ny2: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            prev_asia: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            prev_london: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            prev_ny1: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+            prev_ny2: z.object({ status: z.enum(["LT", "LF", "ST", "SF", "None"]).optional(), broken: z.enum(["yes", "no"]).optional() }),
+          })
+          .partial()
+          .optional()
+          .describe("Prior-session state & broken filters (e.g. { asia: { status: 'LT', broken: 'no' } })"),
+        p12Scenario: z.enum(["1", "2", "3", "4", "5"]).optional(),
+        brokenBroken: z.boolean().optional(),
+        whereDsl: z
+          .string()
+          .optional()
+          .describe("Optional extra EdgeStats DSL WHERE expression (e.g. \"NOT eventDay('FOMC')\")"),
+        since: z.string().optional(),
+        until: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const ctx = await getContext();
+        const res = await runProfilerSuite(ctx.store, ctx.config, args as ProfilerSuiteRequest);
+        return json(res);
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "edge_candle_science",
+    {
+      title: "Candle Science v17.5 (C1 -> C2 -> C3)",
+      description:
+        "Evaluates canonical Candle Science v17.5 over roll-safe (after=1) C1 -> C2 -> C3 triplets (1d CME settlement default, or 4h/1h/15m). Returns C3 direction/breakout/close probabilities with Wilson 95% CIs and all breakout + contained excursion percentile envelopes (P30 CTQ target, P50 median box, P70 reversal limit) in bps of C2C, optionally cross-conditioned on Daily Profiler or Event WHERE expressions.",
+      inputSchema: {
+        symbol: z.string().describe("Configured symbol (e.g. NQ1, ES1)"),
+        tf: z.enum(["1d", "4h", "1h", "15m"]).default("1d"),
+        dims: z
+          .record(z.string(), z.boolean())
+          .optional()
+          .describe("Partial map of the 16 structural dimensions (e.g. { c1_bull: true, c2c_gt_c1h: true })"),
+        whereDsl: z.string().optional().describe("Optional cross-conditioning DSL WHERE clause"),
+        since: z.string().optional(),
+        until: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const ctx = await getContext();
+        const res = await runCandleScienceSuite(ctx.store, ctx.config, {
+          ...args,
+          dims: args.dims as Partial<Record<CsDimName, boolean>> | undefined,
+        });
+        return json(res);
       } catch (err) {
         return toolError(err);
       }

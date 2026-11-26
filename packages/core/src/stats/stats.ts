@@ -72,22 +72,44 @@ export interface DistributionSummary {
   count: number;
   mean: number;
   min: number;
+  p10?: number;
   p25: number;
+  p30?: number;
   median: number;
+  p70?: number;
   p75: number;
   p90: number;
+  p95?: number;
   max: number;
   unit: string;
 }
 
-/** Build from DuckDB quantile_cont(v, [0, .25, .5, .75, .9, 1]) output. */
+/** Build from DuckDB quantile_cont output (supports 6-point legacy or 10-point extended array). */
 export function distributionFromQuantiles(
   count: number,
   mean: number,
   q: number[],
   unit: string,
 ): DistributionSummary | null {
-  if (count <= 0 || q.length !== 6) return null;
-  const [min, p25, median, p75, p90, max] = q as [number, number, number, number, number, number];
-  return { count, mean, min, p25, median, p75, p90, max, unit };
+  if (count <= 0) return null;
+  if (q.length === 10) {
+    const [min, p10, p25, p30, median, p70, p75, p90, p95, max] = q as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
+    return { count, mean, min, p10, p25, p30, median, p70, p75, p90, p95, max, unit };
+  }
+  if (q.length === 6) {
+    const [min, p25, median, p75, p90, max] = q as [number, number, number, number, number, number];
+    return { count, mean, min, p25, median, p75, p90, max, unit };
+  }
+  return null;
 }

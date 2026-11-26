@@ -172,6 +172,7 @@ const CATEGORIES = new Set([
   "time-of-day",
   "volatility",
   "fvg",
+  "profiler",
   "candle-science",
   "liquidity-sweeps",
 ]);

@@ -5,16 +5,24 @@
   the CLI and the MCP server emit.
 */
 import type {
+  CandleScienceSuiteRequest,
+  CandleScienceSuiteResult,
+  CreateSnapshotRequest,
+  EdgeSnapshotV1,
   FreshnessReport,
   LiveSetupState,
   Preset,
   PresetRunRequest,
   PresetRunResult,
+  ProfilerPriceModelResult,
+  ProfilerSuiteRequest,
+  ProfilerSuiteResult,
   QueryRequest,
   QueryResult,
   RegistryEntryDescription,
   SessionBarsResult,
   SessionDetail,
+  SnapshotSummaryItem,
   SymbolConfig,
 } from "@luxalgo/edge-stats";
 
@@ -144,4 +152,27 @@ export const api = {
       signal,
     );
   },
+  profilerSuite: (body: ProfilerSuiteRequest, signal?: AbortSignal) =>
+    post<ProfilerSuiteResult>("/api/profiler/suite", body, signal),
+  profilerPriceModel: (
+    body: ProfilerSuiteRequest & { anchor?: "prev_close" | "daily_open" },
+    signal?: AbortSignal,
+  ) => post<ProfilerPriceModelResult>("/api/profiler/price-model", body, signal),
+  candleScienceSuite: (body: CandleScienceSuiteRequest, signal?: AbortSignal) =>
+    post<CandleScienceSuiteResult>("/api/candle-science/suite", body, signal),
+  liveContext: (symbol: string, signal?: AbortSignal) =>
+    get<{
+      symbol: string;
+      daily: Record<string, unknown> | null;
+      candleScience: Record<string, unknown> | null;
+    }>(`/api/live/context?symbol=${encodeURIComponent(symbol)}`, signal),
+  createSnapshot: (body: CreateSnapshotRequest, signal?: AbortSignal) =>
+    post<EdgeSnapshotV1>("/api/snapshot", body, signal),
+  getSnapshot: (id: string, signal?: AbortSignal) =>
+    get<EdgeSnapshotV1>(`/api/snapshot/${encodeURIComponent(id)}`, signal),
+  listSnapshots: (symbol?: string, signal?: AbortSignal) =>
+    get<{ snapshots: SnapshotSummaryItem[] }>(
+      symbol ? `/api/snapshots?symbol=${encodeURIComponent(symbol)}` : "/api/snapshots",
+      signal,
+    ),
 };

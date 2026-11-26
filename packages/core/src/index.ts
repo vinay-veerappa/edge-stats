@@ -55,12 +55,68 @@ export type {
 export { exportQuery, exportTable } from "./query/export";
 export type { ExportFormat, ExportSummary } from "./query/export";
 
+export {
+  runProfilerSuite,
+  runProfilerPriceModel,
+  offsetMinToEtLabel,
+} from "./query/profilerSuite";
+export type {
+  ProfilerTargetSession,
+  ProfilerSessionFilter,
+  ProfilerSuiteRequest,
+  ProfilerSuiteResult,
+  ProfilerOutcomeRow,
+  ProfilerLevelTouchRow,
+  ProfilerTimeBucket,
+  ProfilerSessionShare,
+  PriceModelPoint,
+  ProfilerPriceModelResult,
+} from "./query/profilerSuite";
+
+export { runCandleScienceSuite } from "./query/candleScienceSuite";
+export type {
+  CandleScienceSuiteRequest,
+  CandleScienceSuiteResult,
+  CsOutcomeStat,
+  CsExcursionRow,
+  CsScenarioCandle,
+  CsProjectionLevels,
+  CsLatestContext,
+} from "./query/candleScienceSuite";
+
+export {
+  createEdgeSnapshot,
+  getEdgeSnapshot,
+  listEdgeSnapshots,
+  ensureSnapshotsTable,
+  renderSnapshotMarkdown,
+} from "./query/snapshots";
+export type {
+  CreateSnapshotRequest,
+  EdgeSnapshotV1,
+  SnapshotSummaryItem,
+} from "./query/snapshots";
+
 // stats
 export * from "./stats/stats";
 
 // features
 export { deriveFeatures } from "./features/derive";
 export type { DeriveOptions, DeriveSummary } from "./features/derive";
+export { deriveDailyForSymbol } from "./features/deriveDaily";
+export type { DeriveDailyOptions, DeriveDailySummary } from "./features/deriveDaily";
+export { ensureDailyTables, dailyContextColumns, CS_CANDLES_COLUMNS, DAILY_PATHS_5M_COLUMNS } from "./features/dailySchema";
+export {
+  LEVEL_KEYS,
+  CS_DIM_NAMES,
+  CS_DIM_BIT,
+  CS_DIM_ALIASES,
+  CS_PRESET_DIMS,
+  runDailyProfilerBatch,
+  runCandleScienceBatch,
+  classifyCandleScienceLive,
+} from "./features/spineAdapter";
+export type { LevelKey, CsDimName, SpineDailyContextRow, SpineCsCandleRow, SpineCsLiveSignature } from "./features/spineAdapter";
 export { featureColumns, featuresDdl, BASE_COLUMNS, orColumns } from "./features/schema";
 
 // adapters

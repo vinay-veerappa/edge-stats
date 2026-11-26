@@ -8,8 +8,11 @@ import { Route, Switch } from "wouter";
 import { Shell } from "./components/layout";
 import { EmptyState } from "./components/ui";
 import { BuilderPage } from "./pages/builder";
+import { CandleSciencePage } from "./pages/candle-science";
 import { DataPage } from "./pages/data";
 import { LivePage } from "./pages/live";
+import { MatrixPage } from "./pages/matrix";
+import { ProfilerPage } from "./pages/profiler";
 import { ReportPage } from "./pages/report";
 import { ReportsPage } from "./pages/reports";
 
@@ -19,6 +22,9 @@ export function App() {
       <Switch>
         <Route path="/" component={ReportsPage} />
         <Route path="/report/:id" component={ReportPage} />
+        <Route path="/profiler" component={ProfilerPage} />
+        <Route path="/candle-science" component={CandleSciencePage} />
+        <Route path="/matrix" component={MatrixPage} />
         <Route path="/builder" component={BuilderPage} />
         <Route path="/live" component={LivePage} />
         <Route path="/data" component={DataPage} />

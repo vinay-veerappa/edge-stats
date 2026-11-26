@@ -34,6 +34,9 @@ const CATEGORIES: { id: string; label: string }[] = [
   { id: "time-of-day", label: "Time of day" },
   { id: "volatility", label: "Volatility" },
   { id: "fvg", label: "Fair value gaps" },
+  { id: "profiler", label: "Daily Profiler" },
+  { id: "candle-science", label: "Candle Science" },
+  { id: "liquidity-sweeps", label: "Liquidity sweeps" },
 ];
 
 /** Windows every default symbol config derives; used only to compile-check preset DSL. */

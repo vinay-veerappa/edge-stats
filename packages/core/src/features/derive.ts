@@ -31,6 +31,9 @@ import type { Store } from "../store/store";
 import { sqlNum, sqlPath, sqlStr } from "../util/sql";
 import { asInt, asNum, asStr, round } from "../util/values";
 import { BAND_HI, BAND_LO, featureColumns, featuresDdl } from "./schema";
+import { type Bar1m, computePostOr30FvgMetrics } from "./fvgRetest";
+import { deriveDailyForSymbol } from "./deriveDaily";
+import { ensureDailyTables } from "./dailySchema";
 
 const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
@@ -51,6 +54,9 @@ interface S1Row {
   contractLast: string | null;
   highTs: number | null;
   lowTs: number | null;
+  sessionVwap: number | null;
+  or30Vwap: number | null;
+  or30Close: number | null;
   or: Map<number, OrRow>;
 }
 
@@ -139,6 +145,10 @@ export interface DeriveOptions {
   symbols?: string[];
   /** Restrict to specific session keys. Symbol configs can carry ~90 of them. */
   sessionKeys?: string[];
+  /** Force full daily_context / cs_candles recomputation instead of incremental watermark. */
+  full?: boolean;
+  /** Skip daily_context / cs_candles derivation when only recomputing specific session keys. */
+  skipDaily?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -151,16 +161,64 @@ export async function deriveFeatures(
   const log = opts.log ?? (() => {});
   const windows = unionWindows(config);
   const recreated = await ensureFeaturesTable(store, windows);
+  await ensureDailyTables(store);
   const symbols = recreated
     ? config.symbols
     : config.symbols.filter((s) => !opts.symbols || opts.symbols.includes(s.symbol));
 
   const summaries: DeriveSummary[] = [];
   for (const symbol of symbols) {
-    for (const sessionKey of derivableSessionKeys(symbol)) {
-      if (opts.sessionKeys && !opts.sessionKeys.includes(sessionKey)) continue;
-      const count = await deriveOne(store, symbol, sessionKey, windows, resolver, log);
-      summaries.push({ symbol: symbol.symbol, sessionKey, sessions: count });
+    const sym = sqlStr(symbol.symbol);
+    const symSrc = store.symbolBars(symbol.symbol, symbol.tf);
+    const keys = derivableSessionKeys(symbol).filter(
+      (k) => !opts.sessionKeys || opts.sessionKeys.includes(k),
+    );
+    if (!symSrc) {
+      for (const sessionKey of keys) {
+        await store.run(
+          `DELETE FROM session_features WHERE symbol = ${sym} AND session_key = ${sqlStr(sessionKey)}`,
+        );
+        summaries.push({ symbol: symbol.symbol, sessionKey, sessions: 0 });
+      }
+      continue;
+    }
+
+    // Hoisted once per symbol: avoids re-reading & sorting Parquet ~88x per symbol!
+    await store.run(`
+      CREATE OR REPLACE TEMP TABLE _sym_bars AS
+      SELECT ts, open, high, low, close, volume, contract
+      FROM ${symSrc}
+      ORDER BY ts
+    `);
+
+    try {
+      const span = await store.one(`SELECT min(ts) AS lo, max(ts) AS hi FROM _sym_bars`);
+      const lo = asNum(span?.lo);
+      const hi = asNum(span?.hi);
+      if (lo === null || hi === null) {
+        for (const sessionKey of keys) {
+          await store.run(
+            `DELETE FROM session_features WHERE symbol = ${sym} AND session_key = ${sqlStr(sessionKey)}`,
+          );
+          summaries.push({ symbol: symbol.symbol, sessionKey, sessions: 0 });
+        }
+        continue;
+      }
+
+      if (!opts.skipDaily) {
+        await deriveDailyForSymbol(store, symbol, {
+          full: opts.full || recreated,
+          symBarsReady: true,
+          log,
+        });
+      }
+
+      for (const sessionKey of keys) {
+        const count = await deriveOne(store, symbol, sessionKey, windows, resolver, log, lo, hi);
+        summaries.push({ symbol: symbol.symbol, sessionKey, sessions: count });
+      }
+    } finally {
+      await store.run("DROP TABLE IF EXISTS _sym_bars");
     }
   }
   return summaries;
@@ -173,22 +231,11 @@ async function deriveOne(
   windows: number[],
   resolver: SessionResolver,
   log: (msg: string) => void,
+  lo: number,
+  hi: number,
 ): Promise<number> {
   const sym = sqlStr(symbol.symbol);
-  const tf = sqlStr(symbol.tf);
   const tfMs = parseTfMs(symbol.tf);
-
-  const span = await store.one(
-    `SELECT min(ts) AS lo, max(ts) AS hi FROM bars WHERE symbol = ${sym} AND tf = ${tf}`,
-  );
-  const lo = asNum(span?.lo);
-  const hi = asNum(span?.hi);
-  if (lo === null || hi === null) {
-    await store.run(
-      `DELETE FROM session_features WHERE symbol = ${sym} AND session_key = ${sqlStr(sessionKey)}`,
-    );
-    return 0;
-  }
 
   const fromDate = DateTime.fromMillis(lo, { zone: "utc" }).minus({ days: 3 }).toISODate();
   const toDate = DateTime.fromMillis(hi, { zone: "utc" }).plus({ days: 2 }).toISODate();
@@ -211,7 +258,7 @@ async function deriveOne(
     await store.run(`INSERT INTO _sess VALUES ${values}`);
   }
 
-  const barsJoin = `JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s.start_ts AND b.ts < s.end_ts`;
+  const barsJoin = `JOIN _sym_bars b ON b.ts >= s.start_ts AND b.ts < s.end_ts`;
 
   // S1: per-session aggregates + OR levels in one pass over bars
   const orLevelSelects = windows
@@ -231,6 +278,10 @@ async function deriveOne(
       arg_max(b.close, b.ts) AS close, sum(b.volume) AS volume,
       min(b.ts) AS first_ts, max(b.ts) AS last_ts,
       arg_min(b.contract, b.ts) AS contract_first, arg_max(b.contract, b.ts) AS contract_last,
+      sum(((b.high + b.low + b.close) / 3.0) * b.volume) / nullif(sum(b.volume), 0) AS session_vwap,
+      sum(((b.high + b.low + b.close) / 3.0) * b.volume) FILTER (WHERE b.ts < s.start_ts + 30 * 60000)
+        / nullif(sum(b.volume) FILTER (WHERE b.ts < s.start_ts + 30 * 60000), 0) AS or30_vwap,
+      arg_max(b.close, b.ts) FILTER (WHERE b.ts < s.start_ts + 30 * 60000) AS or30_close,
       ${orLevelSelects}
     FROM _sess s ${barsJoin}
     GROUP BY s.trade_date
@@ -254,7 +305,7 @@ async function deriveOne(
       min(b.ts) FILTER (WHERE b.high >= s.high) AS high_ts,
       min(b.ts) FILTER (WHERE b.low <= s.low) AS low_ts,
       ${orBreakSelects}
-    FROM _s1 s JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s.start_ts AND b.ts < s.end_ts
+    FROM _s1 s JOIN _sym_bars b ON b.ts >= s.start_ts AND b.ts < s.end_ts
     GROUP BY s.trade_date
   `);
 
@@ -284,7 +335,7 @@ async function deriveOne(
     SELECT s2.trade_date, ${orRetraceSelects}
     FROM _s2 s2
     JOIN _s1 s1 ON s1.trade_date = s2.trade_date
-    JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s1.start_ts AND b.ts < s1.end_ts
+    JOIN _sym_bars b ON b.ts >= s1.start_ts AND b.ts < s1.end_ts
     GROUP BY s2.trade_date
   `);
 
@@ -333,6 +384,9 @@ async function deriveOne(
       contractLast: asStr(r.contract_last),
       highTs: asNum(r.high_ts),
       lowTs: asNum(r.low_ts),
+      sessionVwap: asNum(r.session_vwap),
+      or30Vwap: asNum(r.or30_vwap),
+      or30Close: asNum(r.or30_close),
       or,
     };
   });
@@ -354,6 +408,17 @@ async function deriveOne(
   const trHistory: number[] = [];
   const rangeHistory: number[] = [];
   const volHistory: number[] = [];
+  const orRangeBpsHistory = new Map<number, number[]>();
+
+  // ISO-week tracking for weekly_open / prior_week_high / prior_week_low (roll-masked).
+  let curWeekKey: string | null = null;
+  let curWeekOpen: number | null = null;
+  let curWeekHigh: number | null = null;
+  let curWeekLow: number | null = null;
+  let curWeekHadRoll = false;
+  let prevWeekHigh: number | null = null;
+  let prevWeekLow: number | null = null;
+  let prevWeekHadRoll = false;
 
   for (let i = 0; i < rows.length; i += 1) {
     const cur = rows[i];
@@ -370,6 +435,25 @@ async function deriveOne(
         (cur.contractFirst !== null &&
           cur.contractLast !== null &&
           cur.contractFirst !== cur.contractLast));
+
+    const weekKey = `${dt.weekYear}-W${dt.weekNumber}`;
+    if (weekKey !== curWeekKey) {
+      prevWeekHigh = curWeekHigh;
+      prevWeekLow = curWeekLow;
+      prevWeekHadRoll = curWeekHadRoll;
+      curWeekKey = weekKey;
+      curWeekOpen = cur.open;
+      curWeekHigh = cur.high;
+      curWeekLow = cur.low;
+      curWeekHadRoll = isRoll;
+    } else {
+      if (isRoll) curWeekHadRoll = true;
+      curWeekHigh = curWeekHigh !== null ? Math.max(curWeekHigh, cur.high) : cur.high;
+      curWeekLow = curWeekLow !== null ? Math.min(curWeekLow, cur.low) : cur.low;
+    }
+    const weeklyOpen = !curWeekHadRoll ? curWeekOpen : null;
+    const priorWeekHigh = !curWeekHadRoll && !prevWeekHadRoll ? prevWeekHigh : null;
+    const priorWeekLow = !curWeekHadRoll && !prevWeekHadRoll ? prevWeekLow : null;
 
     const complete =
       cur.barCount > 0 &&
@@ -566,6 +650,18 @@ async function deriveOne(
       news_830_high: null,
       news_830_low: null,
       news_wick_both_sides: null,
+      weekly_open: weeklyOpen,
+      prior_week_high: priorWeekHigh,
+      prior_week_low: priorWeekLow,
+      weekly_open_retrace:
+        weeklyOpen !== null && weeklyOpen !== 0
+          ? cur.low <= weeklyOpen && cur.high >= weeklyOpen
+          : null,
+      prior_week_high_broken: priorWeekHigh !== null ? cur.high > priorWeekHigh : null,
+      prior_week_low_broken: priorWeekLow !== null ? cur.low < priorWeekLow : null,
+      session_vwap: cur.sessionVwap !== null ? round(cur.sessionVwap, 4) : null,
+      avwap_close_above: cur.sessionVwap !== null ? cur.close > cur.sessionVwap : null,
+      or30_break_avwap_aligned: null,
     };
 
     // Opening-range features
@@ -576,6 +672,8 @@ async function deriveOne(
         row[`${p}high`] = null;
         row[`${p}low`] = null;
         row[`${p}range`] = null;
+        row[`${p}range_bps`] = null;
+        row[`${p}range_pctl_20d`] = null;
         row[`${p}first_break`] = null;
         row[`${p}break_min`] = null;
         row[`${p}false_break`] = null;
@@ -622,6 +720,24 @@ async function deriveOne(
       row[`${p}high`] = o.high;
       row[`${p}low`] = o.low;
       row[`${p}range`] = range;
+      const rangeBps = cur.open !== 0 ? round((range / cur.open) * 10000, 2) : null;
+      row[`${p}range_bps`] = rangeBps;
+      let hist = orRangeBpsHistory.get(w);
+      if (!hist) {
+        hist = [];
+        orRangeBpsHistory.set(w, hist);
+      }
+      if (rangeBps !== null && hist.length >= 5) {
+        const win = hist.slice(-20);
+        const le = win.filter((v) => v <= rangeBps).length;
+        row[`${p}range_pctl_20d`] = round((100 * le) / win.length, 1);
+      } else {
+        row[`${p}range_pctl_20d`] = null;
+      }
+      if (rangeBps !== null) {
+        hist.push(rangeBps);
+        if (hist.length > 25) hist.shift();
+      }
       row[`${p}first_break`] = first;
       row[`${p}break_min`] = firstTs !== null ? Math.floor((firstTs - cur.startTs) / 60000) : null;
       row[`${p}false_break`] = falseBreak;
@@ -666,6 +782,11 @@ async function deriveOne(
     }
 
     const o30 = cur.or.get(30);
+    if (o30 && cur.or30Vwap !== null && cur.or30Close !== null) {
+      const f30 = row.or30_first_break;
+      if (f30 === "up") row.or30_break_avwap_aligned = cur.or30Close > cur.or30Vwap;
+      else if (f30 === "down") row.or30_break_avwap_aligned = cur.or30Close < cur.or30Vwap;
+    }
     if (usePrev && prevClose !== null && o30 && o30.high !== null && o30.low !== null) {
       const ce = (cur.open + prevClose) / 2;
       if (gapDir === "up") {
@@ -758,7 +879,7 @@ async function deriveOne(
         min(b.ts) FILTER (WHERE b.high >= p.prev_high) AS touch_ph_ts,
         min(b.ts) FILTER (WHERE b.low <= p.prev_low) AS touch_pl_ts
       FROM _p p JOIN _sess s USING (trade_date)
-      JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf} AND b.ts >= s.start_ts AND b.ts < s.end_ts
+      JOIN _sym_bars b ON b.ts >= s.start_ts AND b.ts < s.end_ts
       GROUP BY p.trade_date
     `);
     const scanByDate = new Map(scanRows.map((r) => [asStr(r.trade_date) ?? "", r]));
@@ -816,8 +937,7 @@ async function deriveOne(
         max(b.high) FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} AND b.ts < s.start_ts + ${offsetMs} + 390*60000) AS rth_high,
         min(b.low)  FILTER (WHERE b.ts >= s.start_ts + ${offsetMs} AND b.ts < s.start_ts + ${offsetMs} + 390*60000) AS rth_low
       FROM _sess s
-      JOIN bars b ON b.symbol = ${sym} AND b.tf = ${tf}
-        AND b.ts >= s.start_ts + ${offsetMs} - 60*60000
+      JOIN _sym_bars b ON b.ts >= s.start_ts + ${offsetMs} - 60*60000
         AND b.ts < s.start_ts + ${offsetMs} + 390*60000
       GROUP BY s.trade_date, s.start_ts
     `);
@@ -859,6 +979,49 @@ async function deriveOne(
     }
   }
 
+  // S5: Post-OR30 1m/5m FVG lifecycle & retest CTQ outcomes (1m bars, sessions with OR30)
+  if (
+    tfMs <= 60000 &&
+    windows.includes(30) &&
+    (sessionKey.startsWith("rth") || sessionKey.startsWith("ny_pm_1330") || sessionKey === "ny_pm")
+  ) {
+    const postRows = await store.all(`
+      SELECT CAST(s.trade_date AS VARCHAR) AS trade_date,
+        b.ts, b.open, b.high, b.low, b.close
+      FROM _sess s
+      JOIN _sym_bars b ON b.ts >= s.start_ts + 30 * 60000 AND b.ts < s.end_ts
+      ORDER BY s.trade_date, b.ts
+    `);
+    const barsByDate = new Map<string, Bar1m[]>();
+    for (const r of postRows) {
+      const td = asStr(r.trade_date);
+      if (!td) continue;
+      let list = barsByDate.get(td);
+      if (!list) {
+        list = [];
+        barsByDate.set(td, list);
+      }
+      list.push({
+        ts: asNum(r.ts) ?? 0,
+        open: asNum(r.open) ?? 0,
+        high: asNum(r.high) ?? 0,
+        low: asNum(r.low) ?? 0,
+        close: asNum(r.close) ?? 0,
+      });
+    }
+    for (const row of out) {
+      const orHi = asNum(row.or30_high);
+      const orLo = asNum(row.or30_low);
+      const endTs = asNum(row.end_ts);
+      const dayBars = barsByDate.get(row.trade_date as string);
+      if (orHi === null || orLo === null || endTs === null || !dayBars || dayBars.length < 5) {
+        continue;
+      }
+      const m = computePostOr30FvgMetrics(dayBars, orHi, orLo, endTs);
+      Object.assign(row, m);
+    }
+  }
+
   // Assemble + insert
   const cols = featureColumns(windows);
   const ndjsonPath = join(store.tmpDir, `features-${randomUUID()}.ndjson`);
@@ -888,7 +1051,7 @@ async function deriveOne(
     }
   }
   await store.run(
-    "DROP TABLE IF EXISTS _s1; DROP TABLE IF EXISTS _s2; DROP TABLE IF EXISTS _sess; DROP TABLE IF EXISTS _p",
+    "DROP TABLE IF EXISTS _s1; DROP TABLE IF EXISTS _s2; DROP TABLE IF EXISTS _s3; DROP TABLE IF EXISTS _sess; DROP TABLE IF EXISTS _p",
   );
   log(`derived ${out.length} sessions for ${symbol.symbol} ${sessionKey}`);
   return out.length;

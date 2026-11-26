@@ -12,6 +12,7 @@ import { QueryError, registry } from "../registry";
 import type { DistributionSummary, GuardResult, StabilitySplit } from "../stats/stats";
 import { applyGuards, distributionFromQuantiles, stabilitySplit, wilson } from "../stats/stats";
 import type { Store } from "../store/store";
+import { ensureDailyTables } from "../features/dailySchema";
 import { sqlDate, sqlStr } from "../util/sql";
 import { asBool, asInt, asNum, asStr, round } from "../util/values";
 import { ENGINE_VERSION } from "../version";
@@ -103,38 +104,99 @@ export function parseRequestAst(req: QueryRequest): QueryAst {
   throw new QueryError("a query needs a dsl string or an ast");
 }
 
+const ensuredDailyStores = new WeakSet<Store>();
+
+async function ensureDailyOnce(store: Store): Promise<void> {
+  if (ensuredDailyStores.has(store)) return;
+  await ensureDailyTables(store);
+  ensuredDailyStores.add(store);
+}
+
 export async function runQuery(
   store: Store,
   config: EdgeStatsConfig,
   req: QueryRequest,
 ): Promise<QueryResult> {
+  await ensureDailyOnce(store);
   const symbol = findSymbol(config, req.symbol);
-  const sessionKey = req.sessionKey ?? defaultSessionKey(symbol);
+  const defaultKey = defaultSessionKey(symbol);
+  const sessionKey = req.sessionKey ?? defaultKey;
   const ast = parseRequestAst(req);
   const compiled = compileQuery(ast, compileCtxFor(symbol));
 
-  const conditions = [
-    `f.symbol = ${sqlStr(symbol.symbol)}`,
-    `f.session_key = ${sqlStr(sessionKey)}`,
-    "f.complete",
-    `(${compiled.eligibilitySql})`,
-  ];
-  if (req.since) conditions.push(`f.trade_date >= ${sqlDate(req.since)}`);
-  if (req.until) conditions.push(`f.trade_date <= ${sqlDate(req.until)}`);
+  const isDaily = sessionKey === "daily";
+  const isCs = sessionKey.startsWith("cs_");
+  const csTf = isCs ? sessionKey.slice(3) : "1d";
+
+  let fromClause: string;
+  let tdCol: string;
+  let yearCol: string;
+  let sessionIdCol: string;
+  let orderCol: string;
+  const conditions: string[] = [];
+
+  if (isDaily) {
+    fromClause = `
+      FROM daily_context d
+      LEFT JOIN cs_candles cs ON cs.symbol = d.symbol AND cs.trade_date = d.trade_date AND cs.tf = '1d'
+      LEFT JOIN session_features f ON f.symbol = d.symbol AND f.trade_date = d.trade_date AND f.session_key = ${sqlStr(defaultKey)}
+    `;
+    tdCol = "d.trade_date";
+    yearCol = "d.year";
+    sessionIdCol = `d.symbol || ':daily:' || CAST(d.trade_date AS VARCHAR)`;
+    orderCol = "d.trade_date";
+    conditions.push(`d.symbol = ${sqlStr(symbol.symbol)}`, "d.complete");
+  } else if (isCs) {
+    fromClause = `
+      FROM cs_candles cs
+      LEFT JOIN daily_context d ON d.symbol = cs.symbol AND d.trade_date = cs.trade_date
+      LEFT JOIN session_features f ON f.symbol = cs.symbol AND f.trade_date = cs.trade_date AND f.session_key = ${sqlStr(defaultKey)}
+    `;
+    tdCol = "cs.trade_date";
+    yearCol = "cs.year";
+    sessionIdCol = `cs.symbol || ':' || ${sqlStr(sessionKey)} || ':' || CAST(cs.bar_ts AS VARCHAR)`;
+    orderCol = "cs.bar_ts";
+    conditions.push(
+      `cs.symbol = ${sqlStr(symbol.symbol)}`,
+      `cs.tf = ${sqlStr(csTf)}`,
+      "cs.complete",
+      "cs.roll_safe",
+    );
+  } else {
+    fromClause = `
+      FROM session_features f
+      LEFT JOIN daily_context d ON d.symbol = f.symbol AND d.trade_date = f.trade_date
+      LEFT JOIN cs_candles cs ON cs.symbol = f.symbol AND cs.trade_date = f.trade_date AND cs.tf = '1d'
+    `;
+    tdCol = "f.trade_date";
+    yearCol = "f.year";
+    sessionIdCol = "f.session_id";
+    orderCol = "f.trade_date";
+    conditions.push(
+      `f.symbol = ${sqlStr(symbol.symbol)}`,
+      `f.session_key = ${sqlStr(sessionKey)}`,
+      "f.complete",
+    );
+  }
+
+  conditions.push(`(${compiled.eligibilitySql})`);
+  if (req.since) conditions.push(`${tdCol} >= ${sqlDate(req.since)}`);
+  if (req.until) conditions.push(`${tdCol} <= ${sqlDate(req.until)}`);
   if (compiled.whereSql) conditions.push(compiled.whereSql);
 
   const recencyWindow = config.recencyWindow;
+  const whereClause = conditions.join("\n      AND ");
+  const succExpr = `coalesce((${compiled.successSql}), FALSE)`;
+  const valExpr = compiled.valueSql ? `(${compiled.valueSql})` : "CAST(NULL AS DOUBLE)";
   const baseSql = `
     SELECT
-      coalesce((${compiled.successSql}), FALSE) AS succ,
-      ${compiled.valueSql ? `(${compiled.valueSql})` : "CAST(NULL AS DOUBLE)"} AS val,
-      f.session_id AS session_id,
-      CAST(f.trade_date AS VARCHAR) AS d,
-      f.year AS y,
-      row_number() OVER (ORDER BY f.trade_date) AS rn,
+      ${succExpr} AS succ,
+      ${valExpr} AS val,
+      ${tdCol} AS td,
+      row_number() OVER (ORDER BY ${orderCol}) AS rn,
       count(*) OVER () AS total
-    FROM session_features f
-    WHERE ${conditions.join("\n      AND ")}
+    ${fromClause}
+    WHERE ${whereClause}
   `;
 
   const totals = await store.one(`
@@ -149,7 +211,7 @@ export async function runQuery(
       coalesce(sum(CASE WHEN rn > total - ${recencyWindow} AND succ THEN 1 ELSE 0 END), 0)::INT AS kr,
       count(val)::INT AS valn,
       avg(val) AS vmean,
-      to_json(quantile_cont(val, [0.0, 0.25, 0.5, 0.75, 0.9, 1.0])) AS vq
+      to_json(quantile_cont(val, [0.0, 0.10, 0.25, 0.30, 0.50, 0.70, 0.75, 0.90, 0.95, 1.0])) AS vq
     FROM (${baseSql})
   `);
 
@@ -160,8 +222,11 @@ export async function runQuery(
   const showEstimate = w !== null && (!guardResult.refused || req.force === true);
 
   const perYearRows = await store.all(`
-    SELECT y AS year, count(*)::INT AS n, sum(CASE WHEN succ THEN 1 ELSE 0 END)::INT AS k
-    FROM (${baseSql}) GROUP BY y ORDER BY y
+    SELECT ${yearCol} AS year, count(*)::INT AS n,
+           coalesce(sum(CASE WHEN ${succExpr} THEN 1 ELSE 0 END), 0)::INT AS k
+    ${fromClause}
+    WHERE ${whereClause}
+    GROUP BY ${yearCol} ORDER BY ${yearCol}
   `);
   const perYear = perYearRows.map((r) => {
     const yn = asInt(r.n) ?? 0;
@@ -179,8 +244,11 @@ export async function runQuery(
     sessionsLimit === 0
       ? []
       : await store.all(`
-          SELECT session_id, d, succ, val
-          FROM (${baseSql}) ORDER BY d DESC LIMIT ${sessionsLimit}
+          SELECT ${sessionIdCol} AS session_id, CAST(${tdCol} AS VARCHAR) AS d,
+                 ${succExpr} AS succ, ${valExpr} AS val
+          ${fromClause}
+          WHERE ${whereClause}
+          ORDER BY ${orderCol} DESC LIMIT ${sessionsLimit}
         `);
   const sessions: SessionRef[] = sessionRows.map((r) => ({
     sessionId: asStr(r.session_id) ?? "",
@@ -201,9 +269,9 @@ export async function runQuery(
     }
     const groupRows = await store.all(`
       SELECT CAST(${field.sql} AS VARCHAR) AS g, count(*)::INT AS n,
-             sum(CASE WHEN succ THEN 1 ELSE 0 END)::INT AS k
-      FROM (SELECT * FROM (${baseSql})) q
-      JOIN session_features f USING (session_id)
+             coalesce(sum(CASE WHEN ${succExpr} THEN 1 ELSE 0 END), 0)::INT AS k
+      ${fromClause}
+      WHERE ${whereClause}
       GROUP BY g ORDER BY g
     `);
     groups = groupRows.map((r) => {

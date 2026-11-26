@@ -1,15 +1,15 @@
 {
   "id": "candle-science",
-  "version": 1,
-  "title": "Candle Science C1->C2->C3 Radar",
+  "version": 2,
+  "title": "Candle Science C1->C2->C3 (v17.5)",
   "category": "candle-science",
-  "summary": "The green-close rate and distribution across 3-candle daily sequences (BULL_BULL, BEAR_BEAR, BULL_BEAR, BEAR_BULL). Each row shows historical probabilities, Wilson 95% confidence intervals, and excursion envelopes (MFE/MAE). Condition on economic calendar events or intraday liquidity sweeps to evaluate the forming C3 candle.",
-  "outcome": "closeGreen",
-  "groupBy": "c1C2Pattern",
+  "summary": "Roll-safe (after=1) C3 bullish close rate and C3-open MFE distribution across C2-vs-C1 structural regimes (Outside, Inside, Higher, Lower) from canonical cs_candles. Condition on Daily Profiler states, economic events, or the 16 structural csDim() flags.",
+  "outcome": "csBull",
+  "groupBy": "csC2Rel",
   "deltas": [
-    "3-candle sequence classification (C1->C2->C3) matching Mickey & Austin methodology",
-    "Wilson 95% confidence intervals and sample size N on every pattern",
-    "Condition directly on economic releases (NEWS_1000, NEWS_0945, CPI, FOMC) and liquidity sweeps"
+    "Canonical 16-dimension C1->C2->C3 structural model via crates/spine_wasm",
+    "Roll-safe after=1 triplet masking and P30/P50/P70 excursion envelopes in bps",
+    "Cross-condition directly with Daily Profiler session sequences and economic events"
   ],
   "library": []
 }

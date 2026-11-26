@@ -49,7 +49,7 @@ interface DefBase {
 export interface FieldDef extends DefBase {
   kind: "field";
   valueType: "number" | "boolean" | "enum";
-  unit?: "%" | "minutes" | "price" | "ratio" | "count" | "r";
+  unit?: "%" | "bps" | "minutes" | "price" | "ratio" | "count" | "r";
   enumValues?: readonly string[];
   /** SQL expression over session_features alias `f`. */
   sql: string;

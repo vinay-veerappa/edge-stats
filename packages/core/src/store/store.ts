@@ -79,6 +79,27 @@ function hasParquet(dir: string): boolean {
   return false;
 }
 
+function barsDiskSignature(barsDir: string, externals: Map<string, ExternalBarSource>): string {
+  const parts: string[] = [];
+  const walk = (dir: string) => {
+    if (!existsSync(dir)) return;
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const ent of entries) {
+      const full = join(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (ent.name.endsWith(".parquet")) {
+        const st = statSync(full);
+        parts.push(`${full}:${st.size}:${Math.trunc(st.mtimeMs)}`);
+      }
+    }
+  };
+  walk(barsDir);
+  for (const e of [...externals.values()].sort((a, b) => a.symbol.localeCompare(b.symbol))) {
+    walk(join(e.root, e.name));
+  }
+  return parts.join("|");
+}
+
 /** Our bar columns as edge-stats' bar row. Both sides are open-stamped, so `ts` is a plain conversion. */
 const EXTERNAL_PROJECTION = `epoch_ms(ts_open) AS ts, open, high, low, close,
   CAST(volume AS DOUBLE) AS volume, CAST(contract AS VARCHAR) AS contract`;
@@ -86,6 +107,7 @@ const EXTERNAL_PROJECTION = `epoch_ms(ts_open) AS ts, open, high, low, close,
 export class Store {
   private readonly externals: Map<string, ExternalBarSource>;
   private readonly economicDb?: string;
+  private fpCache: { sig: string; barsCount: number; barsMaxTs: number } | null = null;
 
   private constructor(
     readonly dataDir: string,
@@ -177,6 +199,20 @@ export class Store {
     }
     if (globs.length === 0) return null;
     return `read_parquet([${globs.map((g) => sqlPath(g)).join(", ")}], union_by_name = true)`;
+  }
+
+  /** SQL source for a single (symbol, tf) across all its parquet files without touching other symbols. */
+  symbolBars(symbol: string, tf: string): string | null {
+    const external = this.externals.get(symbol);
+    if (external) {
+      if (external.tf !== tf) return null;
+      const dir = join(external.root, external.name);
+      if (!hasParquet(dir)) return null;
+      return `(SELECT ${EXTERNAL_PROJECTION} FROM read_parquet(${sqlPath(join(dir, "*.parquet"))}))`;
+    }
+    const dir = join(this.barsDir, `symbol=${symbol}`, `tf=${tf}`);
+    if (!hasParquet(dir)) return null;
+    return `(SELECT ts, open, high, low, close, volume, contract FROM read_parquet(${sqlPath(join(dir, "**", "*.parquet"))}, hive_partitioning = true, union_by_name = true))`;
   }
 
   async run(sql: string): Promise<void> {
@@ -313,6 +349,7 @@ export class Store {
     } finally {
       rmSync(csvPath, { force: true });
     }
+    this.fpCache = null;
     await this.refreshBarsView();
     const first = fresh[0];
     const last = fresh[fresh.length - 1];
@@ -329,6 +366,7 @@ export class Store {
     this.refuseExternal(symbol, "drop bars of");
     const symbolDir = join(this.barsDir, `symbol=${symbol}`, `tf=${tf}`);
     rmSync(symbolDir, { recursive: true, force: true });
+    this.fpCache = null;
     await this.refreshBarsView();
   }
 
@@ -476,7 +514,6 @@ export class Store {
 
   /** Deterministic receipt: same store contents ⇒ same fingerprint. */
   async fingerprint(): Promise<string> {
-    const bars = await this.one("SELECT count(*) AS c, coalesce(max(ts), 0) AS m FROM bars");
     let features = { c: 0, m: "" };
     try {
       const row = await this.one(
@@ -487,10 +524,22 @@ export class Store {
       // features not derived yet
     }
     const calendarVersion = (await this.getMeta("calendar_version")) ?? "";
+    const sig = barsDiskSignature(this.barsDir, this.externals);
+    let barsCount: number;
+    let barsMaxTs: number;
+    if (this.fpCache && this.fpCache.sig === sig) {
+      barsCount = this.fpCache.barsCount;
+      barsMaxTs = this.fpCache.barsMaxTs;
+    } else {
+      const bars = await this.one("SELECT count(*) AS c, coalesce(max(ts), 0) AS m FROM bars");
+      barsCount = asInt(bars?.c) ?? 0;
+      barsMaxTs = asNum(bars?.m) ?? 0;
+      this.fpCache = { sig, barsCount, barsMaxTs };
+    }
     const h = createHash("sha256");
-    h.update(String(asInt(bars?.c) ?? 0))
+    h.update(String(barsCount))
       .update(":")
-      .update(String(asNum(bars?.m) ?? 0))
+      .update(String(barsMaxTs))
       .update(":")
       .update(String(features.c))
       .update(":")

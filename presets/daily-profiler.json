@@ -1,0 +1,15 @@
+{
+  "id": "daily-profiler",
+  "version": 1,
+  "title": "Daily Profiler NY2 Continuation Matrix",
+  "category": "profiler",
+  "summary": "Empirical probability of NY2 finishing Long True (LT) grouped by the composite Asia-London overnight alignment regime (AlignedLong, AlignedShort, BrokenBroken, Divergent, Neutral), computed causally via Spine SessionBoxAnalytic.",
+  "outcome": "profilerOutcome(ny2, LT)",
+  "groupBy": "asiaLondonPattern",
+  "deltas": [
+    "Cross-session conditioning of NY2 on Asia, London, NY1, and prior-day states",
+    "Causal Spine SessionBoxAnalytic & ALN parity with Wilson 95% confidence intervals",
+    "Composable with P12 scenarios, 20 reference level touches, and economic events"
+  ],
+  "library": []
+}

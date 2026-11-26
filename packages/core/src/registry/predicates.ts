@@ -476,4 +476,329 @@ export const predicates: PredicateDef[] = [
     examples: ["gapFill WHERE fvgPresent(open, below) AND dayOfWeek = Tue"],
     library: [{ kind: "indicator", slug: "fvg-sessions" }],
   },
+  {
+    kind: "predicate",
+    name: "weeklyOpenRetraced",
+    title: "Weekly open retraced",
+    doc: "Session traded through the current ISO week's opening price (roll-masked).",
+    args: [],
+    sql: () => "f.weekly_open_retrace",
+    examples: ["closeGreen WHERE weeklyOpenRetraced"],
+  },
+  {
+    kind: "predicate",
+    name: "priorWeekHighBroken",
+    title: "Prior week high broken",
+    doc: "Session traded strictly above the prior completed ISO week's high (roll-masked).",
+    args: [],
+    sql: () => "f.prior_week_high_broken",
+    examples: ["closeGreen WHERE priorWeekHighBroken"],
+  },
+  {
+    kind: "predicate",
+    name: "priorWeekLowBroken",
+    title: "Prior week low broken",
+    doc: "Session traded strictly below the prior completed ISO week's low (roll-masked).",
+    args: [],
+    sql: () => "f.prior_week_low_broken",
+    examples: ["closeGreen WHERE priorWeekLowBroken"],
+  },
+  {
+    kind: "predicate",
+    name: "avwapCloseAbove",
+    title: "Closed above session VWAP",
+    doc: "Session closed strictly above its own volume-weighted average price.",
+    args: [],
+    sql: () => "f.avwap_close_above",
+    examples: ["orbTargetHit(30, 1) WHERE avwapCloseAbove"],
+  },
+  {
+    kind: "predicate",
+    name: "or30BreakAvwapAligned",
+    title: "30m OR break aligned with 30m AVWAP",
+    doc: "30m OR broke up while the 30m close sat above 30m VWAP, or broke down while below 30m VWAP (causal at OR30 completion).",
+    args: [],
+    sql: () => "f.or30_break_avwap_aligned",
+    examples: ["orbTargetHit(30, 1) WHERE or30BreakAvwapAligned"],
+  },
+  {
+    kind: "predicate",
+    name: "fvg1mFormed",
+    title: "Post-OR30 1m FVG breakout formed",
+    doc: "A >= 1.0 bps 1m FVG closed beyond OR30 before the entry cutoff.",
+    args: [],
+    sql: () => "f.fvg1m_dir IS NOT NULL",
+    examples: ["fvg1mRetestWin WHERE fvg1mFormed"],
+  },
+  {
+    kind: "predicate",
+    name: "fvg1mRetested",
+    title: "Post-OR30 1m FVG retested",
+    doc: "Price retested the first post-OR30 1m FVG edge within 10 bars.",
+    args: [],
+    sql: () => "f.fvg1m_retested",
+    examples: ["fvg1mHeld WHERE fvg1mRetested"],
+  },
+  {
+    kind: "predicate",
+    name: "fvg5mRetested",
+    title: "Post-OR30 5m FVG retested",
+    doc: "Price retested the first post-OR30 5m FVG edge within 15 bars.",
+    args: [],
+    sql: () => "f.fvg5m_retested",
+    examples: ["fvg5mRetestWin WHERE fvg5mRetested"],
+  },
+  // ── Daily Profiler cross-session predicates ─────────────────────────────────
+  {
+    kind: "predicate",
+    name: "sessionStatus",
+    title: "Profiler session status",
+    doc: "Filters by a Profiler session's causal status (LT, LF, ST, SF, None) on daily_context.",
+    args: [
+      {
+        name: "session",
+        type: "enum",
+        values: [
+          "asia",
+          "london",
+          "ny1",
+          "ny2",
+          "prev_asia",
+          "prev_london",
+          "prev_ny1",
+          "prev_ny2",
+        ] as const,
+        required: true,
+        doc: "Profiler session key",
+      },
+      {
+        name: "status",
+        type: "enum",
+        values: ["LT", "LF", "ST", "SF", "None"] as const,
+        required: true,
+        doc: "Session status",
+      },
+    ],
+    sql: (a) => `d.${String(a.session)}_status = ${sqlStr(String(a.status))}`,
+    examples: [
+      "profilerOutcome(ny2, LT) WHERE sessionStatus(asia, LT) AND sessionStatus(london, LT)",
+    ],
+  },
+  {
+    kind: "predicate",
+    name: "sessionTrueFalse",
+    title: "Profiler session True/False or Long/Short side",
+    doc: "Matches LT|ST (true), LF|SF (false), LT|LF (long), or ST|SF (short) for a Profiler session.",
+    args: [
+      {
+        name: "session",
+        type: "enum",
+        values: ["asia", "london", "ny1", "ny2", "prev_ny1", "prev_ny2"] as const,
+        required: true,
+        doc: "Profiler session",
+      },
+      {
+        name: "side",
+        type: "enum",
+        values: ["true", "false", "long", "short"] as const,
+        required: true,
+        doc: "Grouped side",
+      },
+    ],
+    sql: (a) => {
+      const col = `d.${String(a.session)}_status`;
+      if (a.side === "true") return `${col} IN ('LT', 'ST')`;
+      if (a.side === "false") return `${col} IN ('LF', 'SF')`;
+      if (a.side === "long") return `${col} IN ('LT', 'LF')`;
+      return `${col} IN ('ST', 'SF')`;
+    },
+    examples: ["profilerOutcome(ny1, LT) WHERE sessionTrueFalse(asia, true)"],
+  },
+  {
+    kind: "predicate",
+    name: "sessionBroken",
+    title: "Profiler session mid broken",
+    doc: "Filters by whether a Profiler session's box midpoint was touched during its broken window.",
+    args: [
+      {
+        name: "session",
+        type: "enum",
+        values: [
+          "asia",
+          "london",
+          "ny1",
+          "ny2",
+          "prev_asia",
+          "prev_london",
+          "prev_ny1",
+          "prev_ny2",
+        ] as const,
+        required: true,
+        doc: "Profiler session",
+      },
+      {
+        name: "broken",
+        type: "enum",
+        values: ["yes", "no"] as const,
+        default: "yes",
+        doc: "Broken status (yes or no)",
+      },
+    ],
+    sql: (a) => `d.${String(a.session)}_broken = ${a.broken === "yes" ? "TRUE" : "FALSE"}`,
+    examples: ["profilerOutcome(ny2, LT) WHERE sessionBroken(asia, no) AND sessionBroken(london, no)"],
+  },
+  {
+    kind: "predicate",
+    name: "overnightAligned",
+    title: "Asia & London aligned overnight",
+    doc: "Asia and London share directional bias without Broken-Broken contradiction.",
+    args: [
+      {
+        name: "dir",
+        type: "enum",
+        values: ["any", "long", "short"] as const,
+        default: "any",
+        doc: "Direction (any, long, short)",
+      },
+    ],
+    sql: (a) => {
+      if (a.dir === "long") return `d.asia_london_pattern = 'AlignedLong'`;
+      if (a.dir === "short") return `d.asia_london_pattern = 'AlignedShort'`;
+      return `d.asia_london_aligned = TRUE`;
+    },
+    examples: ["closeGreen WHERE overnightAligned(long)"],
+  },
+  {
+    kind: "predicate",
+    name: "p12ScenarioIs",
+    title: "P12 scenario equals",
+    doc: "Matches P12 06:00-08:30 touch scenario (1..5).",
+    args: [
+      {
+        name: "scenario",
+        type: "enum",
+        values: ["1", "2", "3", "4", "5"] as const,
+        required: true,
+        doc: "P12 scenario number",
+      },
+    ],
+    sql: (a) => `d.p12_scenario = ${sqlStr(String(a.scenario))}`,
+    examples: ["closeGreen WHERE p12ScenarioIs(2)"],
+  },
+  {
+    kind: "predicate",
+    name: "levelTouched",
+    title: "Reference level touched",
+    doc: "True when one of the 20 Profiler reference levels was touched (optionally in a specific session window).",
+    args: [
+      {
+        name: "level",
+        type: "enum",
+        values: [
+          "pdh",
+          "pdm",
+          "pdl",
+          "p12h",
+          "p12m",
+          "p12l",
+          "ny_p12h",
+          "ny_p12m",
+          "ny_p12l",
+          "daily_open",
+          "midnight_open",
+          "open_0730",
+          "asia_mid",
+          "london_mid",
+          "ny1_mid",
+          "ny2_mid",
+          "prev_asia_mid",
+          "prev_london_mid",
+          "prev_ny1_mid",
+          "prev_ny2_mid",
+        ] as const,
+        required: true,
+        doc: "Reference level key",
+      },
+      {
+        name: "window",
+        type: "enum",
+        values: ["any", "asia", "london", "ny1", "ny2", "p12"] as const,
+        default: "any",
+        doc: "Session window filter",
+      },
+    ],
+    sql: (a) => {
+      const lv = String(a.level);
+      const w = String(a.window);
+      if (w === "any") return `d.touch_${lv} = TRUE`;
+      const bit = w === "asia" ? 1 : w === "london" ? 2 : w === "ny1" ? 4 : w === "ny2" ? 8 : 16;
+      return `(d.touch_${lv}_mask & ${bit}) <> 0`;
+    },
+    examples: ["closeGreen WHERE levelTouched(pdl, london)"],
+  },
+  // ── Candle Science v17.5 predicates ─────────────────────────────────────────
+  {
+    kind: "predicate",
+    name: "csDim",
+    title: "Candle Science structural dimension",
+    doc: "Tests one of the 16 canonical Candle Science structural bits on cs_candles.sig_mask.",
+    args: [
+      {
+        name: "dim",
+        type: "enum",
+        values: [
+          "c1_bull",
+          "c2_bull",
+          "c2h_gt_c1h",
+          "c2h_gt_c1o",
+          "c2l_gt_c1l",
+          "c2l_gt_c1o",
+          "c2c_gt_c1h",
+          "c2c_gt_c1l",
+          "c2c_gt_c1c",
+          "c2c_gt_c1o",
+          "c2o_gt_c1c",
+          "c2o_gt_c1o",
+          "c3o_gt_c2h",
+          "c3o_gt_c2l",
+          "c3o_gt_c2c",
+          "c3o_gt_c2o",
+        ] as const,
+        required: true,
+        doc: "Structural dimension name",
+      },
+      {
+        name: "value",
+        type: "enum",
+        values: ["yes", "no"] as const,
+        default: "yes",
+        doc: "Whether the structural condition holds (yes/no)",
+      },
+    ],
+    sql: (a) => {
+      const dims = [
+        "c1_bull",
+        "c2_bull",
+        "c2h_gt_c1h",
+        "c2h_gt_c1o",
+        "c2l_gt_c1l",
+        "c2l_gt_c1o",
+        "c2c_gt_c1h",
+        "c2c_gt_c1l",
+        "c2c_gt_c1c",
+        "c2c_gt_c1o",
+        "c2o_gt_c1c",
+        "c2o_gt_c1o",
+        "c3o_gt_c2h",
+        "c3o_gt_c2l",
+        "c3o_gt_c2c",
+        "c3o_gt_c2o",
+      ];
+      const bit = 1 << dims.indexOf(String(a.dim));
+      return a.value === "yes"
+        ? `(cs.roll_safe = TRUE AND (cs.sig_mask & ${bit}) <> 0)`
+        : `(cs.roll_safe = TRUE AND (cs.sig_mask & ${bit}) = 0)`;
+    },
+    examples: ["csBreakHigh WHERE csDim(c2c_gt_c1h, yes) AND csDim(c3o_gt_c2c, yes)"],
+  },
 ];

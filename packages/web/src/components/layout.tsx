@@ -27,6 +27,13 @@ function Mark() {
 
 const NAV = [
   { href: "/", label: "Reports", match: (p: string) => p === "/" || p.startsWith("/report/") },
+  { href: "/profiler", label: "Profiler", match: (p: string) => p.startsWith("/profiler") },
+  {
+    href: "/candle-science",
+    label: "Candle Science",
+    match: (p: string) => p.startsWith("/candle-science"),
+  },
+  { href: "/matrix", label: "Matrix", match: (p: string) => p.startsWith("/matrix") },
   { href: "/builder", label: "Builder", match: (p: string) => p.startsWith("/builder") },
   { href: "/live", label: "Live", match: (p: string) => p.startsWith("/live") },
   { href: "/data", label: "Data", match: (p: string) => p.startsWith("/data") },

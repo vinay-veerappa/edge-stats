@@ -14,19 +14,29 @@ import {
   DslSyntaxError,
   QueryError,
   SESSION_BARS_MAX_CONTEXT,
+  createEdgeSnapshot,
   describeRegistry,
+  deriveDailyForSymbol,
+  ensureDailyTables,
   evaluateMarketCoaching,
   freshness,
+  getEdgeSnapshot,
   getSessionBars,
   getSessions,
   listAdapters,
   listCoachModules,
+  listEdgeSnapshots,
   readLiveState,
+  runCandleScienceSuite,
   runPreset,
+  runProfilerPriceModel,
+  runProfilerSuite,
   runQuery,
   setCoachModuleEnabled,
   startSchwabHubFeed,
   syncCoachingToJournal,
+  type CsDimName,
+  type ProfilerSuiteRequest,
   type QueryRequest,
 } from "@luxalgo/edge-stats";
 import { z } from "zod";
@@ -139,6 +149,159 @@ export function buildApp(ctx: CliContext): Hono {
   // Live Board state: the board writes the 'live_state' meta seam every
   // evaluation pass; absent or unparseable reads as { enabled: false }.
   app.get("/api/live/state", async (c) => c.json(await readLiveState(ctx.store)));
+
+  // Daily Profiler & Candle Science native suites + live context
+  const profilerFilterSchema = z.object({
+    status: z.string().optional(),
+    broken: z.enum(["yes", "no"]).optional(),
+  });
+  const profilerBodySchema = z.object({
+    symbol: z.string(),
+    targetSession: z.enum(["asia", "london", "ny1", "ny2", "daily"]).default("ny1"),
+    filters: z
+      .object({
+        asia: profilerFilterSchema,
+        london: profilerFilterSchema,
+        ny1: profilerFilterSchema,
+        ny2: profilerFilterSchema,
+        prev_asia: profilerFilterSchema,
+        prev_london: profilerFilterSchema,
+        prev_ny1: profilerFilterSchema,
+        prev_ny2: profilerFilterSchema,
+      })
+      .partial()
+      .optional(),
+    p12Scenario: z.string().optional(),
+    alnPattern: z.string().optional(),
+    brokenBroken: z.boolean().optional(),
+    csC1Dir: z.enum(["bull", "bear"]).optional(),
+    csC2Dir: z.enum(["bull", "bear"]).optional(),
+    whereDsl: z.string().optional(),
+    since: z.string().optional(),
+    until: z.string().optional(),
+    bucketMinutes: z.union([z.literal(5), z.literal(15), z.literal(30), z.literal(60)]).optional(),
+    anchor: z.enum(["prev_close", "daily_open"]).optional(),
+  });
+
+  app.post("/api/profiler/suite", async (c) => {
+    const body = profilerBodySchema.parse(await c.req.json());
+    return c.json(await runProfilerSuite(ctx.store, ctx.config, body as ProfilerSuiteRequest));
+  });
+
+  app.post("/api/profiler/price-model", async (c) => {
+    const body = profilerBodySchema.parse(await c.req.json());
+    return c.json(
+      await runProfilerPriceModel(ctx.store, ctx.config, body as ProfilerSuiteRequest & { anchor?: "prev_close" | "daily_open" }),
+    );
+  });
+
+  const csBodySchema = z.object({
+    symbol: z.string(),
+    tf: z.enum(["1d", "4h", "1h", "15m"]).optional(),
+    dims: z.record(z.string(), z.boolean()).optional(),
+    whereDsl: z.string().optional(),
+    since: z.string().optional(),
+    until: z.string().optional(),
+  });
+
+  app.post("/api/candle-science/suite", async (c) => {
+    const body = csBodySchema.parse(await c.req.json());
+    return c.json(
+      await runCandleScienceSuite(ctx.store, ctx.config, {
+        ...body,
+        dims: body.dims as Partial<Record<CsDimName, boolean>> | undefined,
+      }),
+    );
+  });
+
+  app.post("/api/daily/derive", async (c) => {
+    const body = z
+      .object({
+        symbols: z.array(z.string()).optional(),
+        full: z.boolean().optional(),
+      })
+      .parse(await c.req.json().catch(() => ({})));
+    const targets = body.symbols?.length
+      ? ctx.config.symbols.filter((s) => body.symbols!.includes(s.symbol))
+      : ctx.config.symbols;
+    const results = [];
+    for (const sym of targets) {
+      results.push(await deriveDailyForSymbol(ctx.store, sym, { full: body.full }));
+    }
+    return c.json({ ok: true, results });
+  });
+
+  // Journal-ready immutable Snapshot API (POST /api/snapshot, GET /api/snapshot/:id, GET /api/snapshots)
+  app.post("/api/snapshot", async (c) => {
+    const body = z
+      .object({
+        symbol: z.string(),
+        kind: z.enum(["candle_science", "profiler", "combined"]).optional(),
+        tf: z.enum(["1d", "4h", "1h", "15m"]).optional(),
+        candleScience: csBodySchema.omit({ symbol: true }).optional(),
+        profiler: profilerBodySchema.omit({ symbol: true }).optional(),
+        note: z.string().optional(),
+      })
+      .parse(await c.req.json());
+    const snap = await createEdgeSnapshot(ctx.store, ctx.config, {
+      symbol: body.symbol,
+      kind: body.kind,
+      tf: body.tf,
+      note: body.note,
+      candleScience: body.candleScience
+        ? {
+            ...body.candleScience,
+            dims: body.candleScience.dims as Partial<Record<CsDimName, boolean>> | undefined,
+          }
+        : undefined,
+      profiler: body.profiler as Omit<ProfilerSuiteRequest, "symbol"> | undefined,
+    });
+    return c.json(snap);
+  });
+
+  app.get("/api/snapshot/:id", async (c) => {
+    const snap = await getEdgeSnapshot(ctx.store, c.req.param("id"));
+    if (!snap) return c.json({ error: "snapshot not found" }, 404);
+    return c.json(snap);
+  });
+
+  app.get("/api/snapshots", async (c) => {
+    const symbol = c.req.query("symbol");
+    const tradeDate = c.req.query("tradeDate");
+    const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
+    return c.json({ snapshots: await listEdgeSnapshots(ctx.store, { symbol, tradeDate, limit }) });
+  });
+
+  app.get("/api/live/context", async (c) => {
+    await ensureDailyTables(ctx.store);
+    const sym = c.req.query("symbol") ?? ctx.config.symbols[0]?.symbol ?? "NQ1";
+    const safeSym = sym.replaceAll("'", "''");
+    const latestDay = await ctx.store.one(`
+      SELECT CAST(trade_date AS VARCHAR) AS tradeDate,
+             asia_status AS asiaStatus, asia_broken AS asiaBroken,
+             london_status AS londonStatus, london_broken AS londonBroken,
+             ny1_status AS ny1Status, ny1_broken AS ny1Broken,
+             ny2_status AS ny2Status, ny2_broken AS ny2Broken,
+             prev_ny1_status AS prevNy1Status, prev_ny1_broken AS prevNy1Broken,
+             prev_ny2_status AS prevNy2Status, prev_ny2_broken AS prevNy2Broken,
+             p12_scenario AS p12Scenario, aln_pattern AS alnPattern, broken_broken AS brokenBroken,
+             complete
+      FROM daily_context
+      WHERE symbol = '${safeSym}'
+      ORDER BY trade_date DESC
+      LIMIT 1
+    `);
+    const latestCs = await ctx.store.one(`
+      SELECT CAST(trade_date AS VARCHAR) AS tradeDate,
+             c1_o, c1_h, c1_l, c1_c, c2_o, c2_h, c2_l, c2_c, c3_o,
+             sig_mask AS sigMask, c1_dir AS c1Dir, c2_dir AS c2Dir
+      FROM cs_candles
+      WHERE symbol = '${safeSym}' AND tf = '1d'
+      ORDER BY bar_ts DESC
+      LIMIT 1
+    `);
+    return c.json({ symbol: sym, daily: latestDay ?? null, candleScience: latestCs ?? null });
+  });
 
   // Phase 2 Market Coaching: cross-instrument setup scanner + EdgeStats conditioning.
   app.get("/api/coaching/live", async (c) =>

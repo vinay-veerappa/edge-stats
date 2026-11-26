@@ -1,0 +1,38 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_analytichandle_free: (a: number, b: number) => void;
+export const __wbg_renkohandle_free: (a: number, b: number) => void;
+export const __wbg_sizedrenkohandle_free: (a: number, b: number) => void;
+export const analytic_params_schema: (a: number, b: number, c: number) => void;
+export const analytichandle_describe: (a: number, b: number) => void;
+export const analytichandle_feed_companion_bar: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const analytichandle_feed_setup: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const analytichandle_new: (a: number, b: number, c: number, d: number, e: number) => number;
+export const analytichandle_on_bars: (a: number, b: number, c: number, d: number) => void;
+export const analytichandle_restore: (a: number, b: number, c: number, d: number) => void;
+export const analytichandle_snapshot: (a: number, b: number) => void;
+export const candle_science_batch: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => void;
+export const candle_science_live: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => void;
+export const daily_profiler_batch: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => void;
+export const play1_evaluate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => void;
+export const play1_overlay: (a: number, b: number, c: number, d: number, e: number) => void;
+export const renkohandle_new: (a: number, b: number) => number;
+export const renkohandle_on_bars: (a: number, b: number, c: number, d: number) => void;
+export const renkohandle_on_bars_binary: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => void;
+export const renkohandle_on_trades: (a: number, b: number, c: number, d: number) => void;
+export const renkohandle_projection: (a: number, b: number) => void;
+export const renkohandle_restore: (a: number, b: number, c: number, d: number) => void;
+export const renkohandle_snapshot: (a: number, b: number) => void;
+export const sizedrenkohandle_new: (a: number, b: number) => number;
+export const sizedrenkohandle_on_bars: (a: number, b: number, c: number, d: number) => void;
+export const sizedrenkohandle_on_bars_binary: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => void;
+export const sizedrenkohandle_projection: (a: number, b: number) => void;
+export const sizedrenkohandle_restore: (a: number, b: number, c: number, d: number) => void;
+export const sizedrenkohandle_sizes: (a: number, b: number) => void;
+export const sizedrenkohandle_snapshot: (a: number, b: number) => void;
+export const spine_play1_evaluate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => number;
+export const __wbindgen_add_to_stack_pointer: (a: number) => number;
+export const __wbindgen_export: (a: number, b: number) => number;
+export const __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_export3: (a: number, b: number, c: number) => void;
